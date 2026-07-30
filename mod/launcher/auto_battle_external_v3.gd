@@ -26,6 +26,10 @@ var _turn_running := false
 var _active_controller = null
 var _decisions_this_turn := 0
 var _pending_action := ""
+# A hero on a red cell may attack only if an exact retreat has already been
+# traced. Keep it as a transaction so post-attack reevaluation cannot spend
+# the reserved AP on an unrelated action.
+var _committed_retreat: Dictionary = {}
 var _overlay: CanvasLayer
 var _overlay_root: Control
 var _button = null
@@ -66,6 +70,7 @@ func _hide_auto_outside_battle() -> void:
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
+	_committed_retreat.clear()
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
 		_set_auto_button_visible(false)
@@ -131,6 +136,7 @@ func _on_battle_end() -> void:
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
+	_committed_retreat.clear()
 	_approach_memory.clear()
 	_last_consumable_catalog.clear()
 	_last_talent_profile.clear()
@@ -265,6 +271,7 @@ func _start_active_player_turn() -> void:
 	_active_controller = controller
 	_decisions_this_turn = 0
 	_pending_action = ""
+	_committed_retreat.clear()
 	_log_state(controller)
 	_decide_next_action.call_deferred()
 
@@ -297,6 +304,13 @@ func _decide_next_action() -> void:
 		var ability = plan.ability
 		var target: Vector2i = plan.target
 		_pending_action = str(plan.kind)
+		_committed_retreat.clear()
+		if bool(plan.get("escape_after_attack", false)):
+			_committed_retreat = {
+				"controller": controller,
+				"target": plan.escape_target,
+				"nonce": _battle_nonce
+			}
 		if plan.kind == "ultimate":
 			_rage_followup_controller_id = int(controller.get_instance_id())
 		var action_label := "ATTACK"
@@ -373,6 +387,8 @@ func _wait_for_attack(controller, polls: int, battle_nonce: int) -> void:
 		return
 	_clear_approach_memory(controller)
 	_log("attack completed")
+	if _start_committed_retreat(controller, battle_nonce):
+		return
 	_decide_next_action.call_deferred()
 
 
@@ -396,6 +412,27 @@ func _on_move_timeout(controller, battle_nonce: int) -> void:
 	_log("move timeout - reevaluating")
 	_decide_next_action.call_deferred()
 
+
+func _start_committed_retreat(controller, battle_nonce: int) -> bool:
+	if _committed_retreat.is_empty():
+		return false
+	var retreat := _committed_retreat.duplicate()
+	_committed_retreat.clear()
+	if int(retreat.get("nonce", -1)) != battle_nonce or retreat.get("controller", null) != controller:
+		return false
+	var incoming := _incoming_damage_at(controller.controlled_object.obj_position)
+	var safe_move := _choose_best_move(controller, incoming, true, false, true)
+	if safe_move.is_empty():
+		_log("ESCAPE INVALIDATED - no verified safe exit after attack")
+		return false
+	_pending_action = "move"
+	_log("MOVE -> %s | COMMITTED SAFE EXIT after attack (planned %s), AP %d" % [str(safe_move.target), str(retreat.target), int(safe_move.energy)])
+	controller.movement_done.connect(_on_auto_move_done.bind(controller, _battle_nonce), CONNECT_ONE_SHOT)
+	controller.set_movement_mode(true)
+	controller.focused_cell = safe_move.target
+	controller.move_to_tile(safe_move.target)
+	get_tree().create_timer(2.5).timeout.connect(_on_move_timeout.bind(controller, _battle_nonce), CONNECT_ONE_SHOT)
+	return true
 
 func _choose_plan(controller) -> Dictionary:
 	var hero = controller.controlled_object
@@ -554,6 +591,9 @@ func _choose_attack_then_safe_escape(controller, attack: Dictionary, current_inc
 	var escape := _choose_best_move(controller, current_incoming, true, false, true, remaining_ap)
 	if escape.is_empty():
 		return {}
+	attack["escape_after_attack"] = true
+	attack["escape_target"] = escape.target
+	attack["escape_energy"] = int(escape.energy)
 	attack["reason"] = "HIT THEN ESCAPE - reserve %d AP to %s; " % [remaining_ap, str(escape.target)] + str(attack.reason)
 	return attack
 
