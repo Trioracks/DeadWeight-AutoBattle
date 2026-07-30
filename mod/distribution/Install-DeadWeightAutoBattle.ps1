@@ -1,6 +1,7 @@
 param(
     [string]$GameDirectory = '',
-    [switch]$NoDesktopShortcut
+    [switch]$NoDesktopShortcut,
+    [switch]$NoInteractive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,15 +104,17 @@ try {
     $shortcut = if ($NoDesktopShortcut) { $null } else { Create-DesktopShortcut $destination $GameDirectory }
     $steamLauncher = Join-Path $destination 'Launch via Steam.cmd'
     $steamOption = 'cmd /d /s /c ""{0}" %command%"' -f $steamLauncher
-    try { Set-Clipboard -Value $steamOption } catch { }
+    if (-not $NoInteractive) { try { Set-Clipboard -Value $steamOption } catch { } }
 
     Add-Type -AssemblyName System.Windows.Forms
     $message = "Installed in:`n$destination`n`nA desktop shortcut was created: $shortcut`n`nFor Steam: open Dead Weight > Properties > Launch Options and press Ctrl+V. The command is already copied to your clipboard.`n`nFrom now on, this launch path checks the official GitHub release before every start. Updates are SHA-256 verified; only DeadWeightAutoBattle is replaced."
-    [System.Windows.Forms.MessageBox]::Show($message, 'Dead Weight - AUTO Battle installed', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    if (-not $NoInteractive) {
+        [System.Windows.Forms.MessageBox]::Show($message, 'Dead Weight - AUTO Battle installed', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    }
 } catch {
     try {
         Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Dead Weight - AUTO Battle installation failed', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        if (-not $NoInteractive) { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Dead Weight - AUTO Battle installation failed', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null }
     } catch { }
     exit 1
 }
