@@ -553,7 +553,7 @@ func _choose_plan(controller) -> Dictionary:
 
 
 func _attack_makes_progress(attack: Dictionary) -> bool:
-	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or bool(attack.get("fall", false)))
+	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or bool(attack.get("fall", false)))
 
 
 
@@ -1223,6 +1223,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var lethal := false
 	var fall := false
 	var enemy_damage := 0
+	var enemy_push_hits := 0
 	var self_damage := 0
 	var removed_threat_controllers: Array = []
 	var killed_enemy_controllers: Array = []
@@ -1258,6 +1259,12 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		var push_result := _score_push_falls(ability, start, target)
 		score += float(push_result.score)
 		fall = bool(push_result.fall)
+		enemy_push_hits = int(push_result.enemy_impacts)
+		if enemy_push_hits > 0:
+			score += float(enemy_push_hits) * 9000.0
+			for impacted_controller in push_result.impacted_enemy_controllers:
+				if impacted_controller != null and not hit_enemy_controllers.has(impacted_controller):
+					hit_enemy_controllers.append(impacted_controller)
 		if int(push_result.enemy_falls) > 0:
 			lethal = true
 
@@ -1298,13 +1305,15 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	elif party_threats_after > party_threats_before:
 		score -= 30000.0
 
-	if enemy_damage <= 0 and not fall:
+	if enemy_damage <= 0 and enemy_push_hits <= 0 and not fall:
 		score -= 900.0
 
 	var danger_text := "%s->%s" % ["RED" if self_threatened else "CLEAR", "CLEAR" if self_safe_after else "RED"]
 	var reason := "damage %d, targets %d, danger %s, party %d->%d, incoming %d->%d, AP %d" % [enemy_damage, enemy_hit_count, danger_text, party_threats_before, party_threats_after, current_incoming, max(0, incoming_after), cost]
 	if fall:
 		reason = "PUSH INTO FALL (%s)" % reason
+	elif enemy_push_hits > 0:
+		reason = "PUSH OBJECT INTO ENEMY x%d (%s)" % [enemy_push_hits, reason]
 	elif lethal:
 		reason = "lethal (%s)" % reason
 	if enemy_hit_count >= 2:
@@ -1325,6 +1334,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		"fall": fall,
 		"self_damage": self_damage,
 		"enemy_damage": enemy_damage,
+		"enemy_push_hits": enemy_push_hits,
 		"enemy_hit_count": enemy_hit_count,
 		"killed_enemy_controllers": killed_enemy_controllers
 	}
@@ -1334,8 +1344,11 @@ func _score_push_falls(ability, start: Vector2i, target: Vector2i) -> Dictionary
 	var score := 0.0
 	var enemy_falls := 0
 	var object_falls := 0
+	var enemy_impacts := 0
 	var fallen_enemy_controllers: Array = []
+	var impacted_enemy_controllers: Array = []
 	var already_falling: Array = []
+	var push_direction := _direction_from_to(start, target)
 	for mechanic in ability.get_full_mechanics_array():
 		if not mechanic is push_base_mechanics:
 			continue
@@ -1347,6 +1360,27 @@ func _score_push_falls(ability, start: Vector2i, target: Vector2i) -> Dictionary
 			var chain: Array = chains_data.chains[chain_head]
 			if chain.is_empty():
 				continue
+
+			# A movable neutral object (barrel, crate, table) immediately in
+			# front of an enemy is a real tactical hit. Damage prediction in the
+			# game does not always expose this collision, so preserve it as a
+			# separate progress signal for approach and staging decisions.
+			for pushed_object in chain:
+				if pushed_object == null or not is_instance_valid(pushed_object):
+					continue
+				if not _is_movable_push_object(pushed_object):
+					continue
+				for impacted_object in chain:
+					if impacted_object == null or not is_instance_valid(impacted_object):
+						continue
+					if not impacted_object.is_enemy_character():
+						continue
+					if not _is_ahead_on_push_line(pushed_object.obj_position, impacted_object.obj_position, push_direction):
+						continue
+					if impacted_object.my_controller != null and not impacted_enemy_controllers.has(impacted_object.my_controller):
+						impacted_enemy_controllers.append(impacted_object.my_controller)
+						enemy_impacts += 1
+
 			var tail = chain.back()
 			if tail == null or not is_instance_valid(tail) or not tail.is_alive():
 				continue
@@ -1373,9 +1407,35 @@ func _score_push_falls(ability, start: Vector2i, target: Vector2i) -> Dictionary
 		"fall": enemy_falls > 0,
 		"enemy_falls": enemy_falls,
 		"object_falls": object_falls,
-		"fallen_enemy_controllers": fallen_enemy_controllers
+		"enemy_impacts": enemy_impacts,
+		"fallen_enemy_controllers": fallen_enemy_controllers,
+		"impacted_enemy_controllers": impacted_enemy_controllers
 	}
 
+
+func _is_movable_push_object(target) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	if target.is_player_character() or target.is_enemy_character():
+		return false
+	return target.my_params != null and bool(target.my_params.movability)
+
+
+func _is_ahead_on_push_line(from: Vector2i, to: Vector2i, direction: Vector2i) -> bool:
+	var delta := to - from
+	if delta == Vector2i.ZERO or direction == Vector2i.ZERO:
+		return false
+	if direction.x == 0:
+		if delta.x != 0:
+			return false
+	elif signi(delta.x) != direction.x:
+		return false
+	if direction.y == 0:
+		if delta.y != 0:
+			return false
+	elif signi(delta.y) != direction.y:
+		return false
+	return true
 
 func _choose_best_move(controller, current_incoming: int, require_safe: bool = false, one_ap_only: bool = false, flee: bool = false, ap_budget: int = -1) -> Dictionary:
 	var hero = controller.controlled_object
