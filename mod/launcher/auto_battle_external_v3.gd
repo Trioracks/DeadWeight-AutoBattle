@@ -9,10 +9,6 @@ const MAX_DECISIONS_PER_TURN := 7
 const MAX_STALEMATE_MOVES := 4
 const FALL_KILL_SCORE := 100000.0
 const ENEMY_KILL_SCORE := 18000.0
-const ESCAPE_CHECK_MIN_ROUND := 10
-# Disabled until a manual test proves that the game's "quit" battle control is
-# a retreat rather than a run-ending surrender for every encounter type.
-const AUTO_ESCAPE_ENABLED := false
 const EMERGENCY_DAMAGE_RATIO := 0.45
 const LOW_HP_RATIO := 0.40
 const ICON_OFF_TINT := Color(0.58, 0.58, 0.58, 0.82)
@@ -47,7 +43,6 @@ var _rage_followup_controller_id := -1
 var _last_party_profile := ""
 var _battle_round := 0
 var _round_hero_ids: Dictionary = {}
-var _escape_attempted_this_battle := false
 
 
 func _ready() -> void:
@@ -110,7 +105,6 @@ func _on_battle_ready() -> void:
 	_battle_ui_visible = true
 	_battle_round = 0
 	_round_hero_ids.clear()
-	_escape_attempted_this_battle = false
 	_debug_lines.clear()
 	_enabled = _auto_preference
 	_refresh_debug_label()
@@ -155,7 +149,6 @@ func _on_battle_end() -> void:
 
 	_battle_round = 0
 	_round_hero_ids.clear()
-	_escape_attempted_this_battle = false
 func _ensure_overlay() -> void:
 	if is_instance_valid(_button):
 		return
@@ -319,13 +312,6 @@ func _decide_next_action() -> void:
 		call_deferred("_execute_player_attack", controller, ability, target, 0, _battle_nonce)
 		return
 
-	if plan.kind == "escape":
-		_pending_action = "escape"
-		_escape_attempted_this_battle = true
-		_log("FLEE CHECK: " + str(plan.reason))
-		_request_native_escape.call_deferred(_battle_nonce)
-		return
-
 	if plan.kind == "move":
 		var move_target: Vector2i = plan.target
 		_pending_action = "move"
@@ -469,9 +455,6 @@ func _choose_plan(controller) -> Dictionary:
 		if not consumable_protection.is_empty() and consumable_protection.get("target_controller", null) == controller and (bool(consumable_protection.saves_lethal) or bool(consumable_protection.prevents_health_damage)):
 			consumable_protection["reason"] = "NO SAFE EXIT - EMERGENCY ITEM - " + str(consumable_protection.reason)
 			return consumable_protection
-		var emergency_escape := _choose_emergency_escape(controller, incoming)
-		if not emergency_escape.is_empty():
-			return emergency_escape
 		if _can_endure_current_direct_threat(controller):
 			if not attack.is_empty():
 				attack["reason"] = "NO SAFE EXIT - SURVIVABLE DIRECT HIT - " + str(attack.reason)
@@ -552,32 +535,6 @@ func _attack_makes_progress(attack: Dictionary) -> bool:
 	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or bool(attack.get("fall", false)))
 
 
-
-func _choose_emergency_escape(controller, incoming: int) -> Dictionary:
-	# Kept as a future, opt-in policy hook. It must not touch the game's quit UI
-	# until its semantics are verified in a live, disposable encounter.
-	if not AUTO_ESCAPE_ENABLED:
-		return {}
-	# Preserve the party only in a genuine, late-battle dead end. The check is
-	# intentionally later than attacks, items, shields and healing: fleeing must
-	# never replace a legal safe tactical answer.
-	if _battle_round < ESCAPE_CHECK_MIN_ROUND or _escape_attempted_this_battle:
-		return {}
-	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
-		return {}
-	var current_cell: Vector2i = controller.controlled_object.obj_position
-	if not _is_cell_threatened(current_cell):
-		return {}
-	# Recheck the full current AP trace immediately before fleeing. This covers
-	# movement bonuses from gear and temporary effects as well as normal steps.
-	if not _choose_best_move(controller, incoming, true, false, true).is_empty():
-		return {}
-	if not _native_escape_is_available():
-		return {}
-	return {
-		"kind": "escape",
-		"reason": "ROUND %d DEAD END - no safe cell or threat-clearing action; requesting native flee" % _battle_round
-	}
 
 func _choose_attack_then_safe_escape(controller, attack: Dictionary, current_incoming: int) -> Dictionary:
 	if attack.is_empty() or not _attack_makes_progress(attack):
@@ -2215,52 +2172,6 @@ func _find_node_with_script_path(node: Node, script_path: String) -> Node:
 	return null
 
 
-func _get_native_escape_controls() -> Dictionary:
-	var ui := _find_node_with_script_path(get_tree().root, "res://Scripts/UI_scripts/playable_character_battle_ui.gd")
-	if ui == null:
-		return {}
-	var escape_button = ui.get_node_or_null("playable_character_battle_ui/v_box_container/HBoxContainer/control/quit")
-	var confirm_button = ui.get_node_or_null("escape_container/control/margin_container/margin_container/v_box_container/h_box_container/yes_button")
-	return {"ui": ui, "button": escape_button, "confirm": confirm_button}
-
-
-func _native_escape_is_available() -> bool:
-	# Do not bypass encounter restrictions. The game's own button is the source
-	# of truth for whether this particular battle permits a retreat.
-	var controls := _get_native_escape_controls()
-	var escape_button = controls.get("button", null)
-	return escape_button is BaseButton and escape_button.is_visible_in_tree() and not escape_button.disabled
-
-
-func _request_native_escape(battle_nonce: int) -> void:
-	if _battle_closing or battle_nonce != _battle_nonce:
-		return
-	var controls := _get_native_escape_controls()
-	var escape_button = controls.get("button", null)
-	if not (escape_button is BaseButton) or not escape_button.is_visible_in_tree() or escape_button.disabled:
-		_pending_action = ""
-		_log("FLEE CANCELLED - native escape control is unavailable")
-		_finish_active_turn()
-		return
-	# This is the real game button, not a synthetic battle-end. Its own rules,
-	# confirmation dialogue and any encounter-specific consequences still apply.
-	escape_button.emit_signal("pressed")
-	get_tree().create_timer(0.12).timeout.connect(_confirm_native_escape.bind(battle_nonce), CONNECT_ONE_SHOT)
-
-
-func _confirm_native_escape(battle_nonce: int) -> void:
-	if _battle_closing or battle_nonce != _battle_nonce:
-		return
-	var controls := _get_native_escape_controls()
-	var confirm_button = controls.get("confirm", null)
-	if confirm_button is BaseButton and confirm_button.is_visible_in_tree() and not confirm_button.disabled:
-		confirm_button.emit_signal("pressed")
-		_pending_action = ""
-		_log("FLEE CONFIRMED - native battle escape requested")
-		return
-	_pending_action = ""
-	_log("FLEE CANCELLED - game rejected or did not open confirmation")
-	_finish_active_turn()
 
 
 func _log(message: String) -> void:
