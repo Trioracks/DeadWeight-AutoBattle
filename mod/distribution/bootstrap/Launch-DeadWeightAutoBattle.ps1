@@ -79,6 +79,7 @@ function Get-RemoteManifest {
     } else {
         [string]$response.Content
     }
+    return (($json.TrimStart([char]0xFEFF)) | ConvertFrom-Json)
 }
 
 function Test-Sha256([string]$Path, [string]$Expected) {
