@@ -11,6 +11,7 @@ const FALL_KILL_SCORE := 100000.0
 const ENEMY_KILL_SCORE := 18000.0
 const EMERGENCY_DAMAGE_RATIO := 0.45
 const LOW_HP_RATIO := 0.40
+const BATTLE_UI_ATTACH_RETRIES := 40
 const ICON_OFF_TINT := Color(0.58, 0.58, 0.58, 0.82)
 
 var _signals_bus = null
@@ -51,8 +52,7 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if not _battle_ui_visible:
 		return
-	# battle_ready is emitted before Turns.battle_started becomes true. Hiding on
-	# that transient value made the newly created AUTO button disappear in battle.
+	# The UI attaches only after battle_started was observed once. Afterwards,
 	# battle_end is the authoritative signal for leaving the battle UI.
 	if _battle_closing:
 		_hide_auto_outside_battle()
@@ -101,22 +101,41 @@ func _bind_game() -> void:
 
 
 func _on_battle_ready() -> void:
+	# battle_ready is raised while the scene is still being built. Do not attach
+	# a CanvasLayer, inspect a controller, or submit an action in that window.
+	# The native game can safely finish its scene transition first.
 	_battle_closing = false
-	_battle_ui_visible = true
+	_battle_ui_visible = false
 	_battle_round = 0
 	_round_hero_ids.clear()
 	_debug_lines.clear()
-	_enabled = _auto_preference
+	_enabled = false
 	_refresh_debug_label()
 	_battle_nonce += 1
+	_log("battle ready - waiting for stable combat scene")
+	_wait_for_stable_battle_ui.call_deferred(_battle_nonce, 0)
+
+
+func _wait_for_stable_battle_ui(battle_nonce: int, attempts: int) -> void:
+	if _battle_closing or battle_nonce != _battle_nonce:
+		return
+	if _turns == null or not _turns.battle_started:
+		if attempts < BATTLE_UI_ATTACH_RETRIES:
+			get_tree().create_timer(0.10).timeout.connect(_wait_for_stable_battle_ui.bind(battle_nonce, attempts + 1), CONNECT_ONE_SHOT)
+		else:
+			_log("battle UI attach cancelled - battle never became stable")
+		return
+
+	_battle_ui_visible = true
+	_enabled = _auto_preference
+	_ensure_overlay()
 	if is_instance_valid(_overlay_root):
 		_overlay_root.show()
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(_enabled)
 		_set_auto_button_visible(true)
 		_update_button_visual()
-	_log("battle ready - attaching AUTO")
-	_ensure_overlay.call_deferred()
+	_log("battle stable - AUTO attached")
 	if _enabled:
 		_start_active_player_turn.call_deferred()
 
