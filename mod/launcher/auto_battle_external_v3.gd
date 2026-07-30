@@ -492,18 +492,12 @@ func _choose_plan(controller) -> Dictionary:
 		if not consumable_protection.is_empty() and consumable_protection.get("target_controller", null) == controller and (bool(consumable_protection.saves_lethal) or bool(consumable_protection.prevents_health_damage)):
 			consumable_protection["reason"] = "NO SAFE EXIT - EMERGENCY ITEM - " + str(consumable_protection.reason)
 			return consumable_protection
-		if _can_endure_current_direct_threat(controller):
-			if not attack.is_empty():
-				attack["reason"] = "NO SAFE EXIT - SURVIVABLE DIRECT HIT - " + str(attack.reason)
-				return attack
-			return {
-				"kind": "hold",
-				"reason": "NO SAFE EXIT - DIRECT HIT IS SURVIVABLE"
-			}
-		if not attack.is_empty():
-			attack["reason"] = "NO SAFE EXIT - " + str(attack.reason)
-			return attack
-		return {}
+		# Do not trade ordinary HP for damage. The sole exception above is an
+		# explicit Vitality recovery trade, whose next-turn kill has been proved.
+		return {
+			"kind": "hold",
+			"reason": "NO SAFE EXIT - refusing unprotected direct hit"
+		}
 
 
 	# Do not spend a safe hero's AP on routine damage while a companion is still
