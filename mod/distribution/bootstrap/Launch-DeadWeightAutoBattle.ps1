@@ -74,7 +74,11 @@ function Test-RemoteManifest($Manifest) {
 function Get-RemoteManifest {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $response = Invoke-WebRequest -Uri $script:ManifestUrl -UseBasicParsing -TimeoutSec 6 -Headers @{ 'User-Agent' = 'DeadWeight-AutoBattle/1' }
-    return ($response.Content | ConvertFrom-Json)
+    $json = if ($response.Content -is [byte[]]) {
+        [Text.Encoding]::UTF8.GetString([byte[]]$response.Content)
+    } else {
+        [string]$response.Content
+    }
 }
 
 function Test-Sha256([string]$Path, [string]$Expected) {
