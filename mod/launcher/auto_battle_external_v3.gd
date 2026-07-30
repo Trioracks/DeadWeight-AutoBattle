@@ -482,11 +482,18 @@ func _choose_plan(controller) -> Dictionary:
 		if not consumable_protection.is_empty() and consumable_protection.get("target_controller", null) == controller and (bool(consumable_protection.saves_lethal) or bool(consumable_protection.prevents_health_damage)):
 			consumable_protection["reason"] = "NO SAFE EXIT - EMERGENCY ITEM - " + str(consumable_protection.reason)
 			return consumable_protection
-		# Do not trade ordinary HP for damage. The sole exception above is an
-		# explicit Vitality recovery trade, whose next-turn kill has been proved.
+		# If every escape, control action and protection option has failed, use a
+		# survivable hit to make progress instead of handing the enemy a free turn.
+		# This is deliberately below all dodge/kill/protection branches above and
+		# never permits a non-lethal attack to trade the hero's last HP.
+		var can_survive_trade := incoming > 0 and incoming < int(controller.my_params.hp) and not _cell_has_forced_movement_threat(start)
+		var trade_makes_progress := not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0)
+		if can_survive_trade and trade_makes_progress and int(attack.get("self_damage", 0)) <= 0:
+			attack["reason"] = "NO SAFE EXIT - SURVIVABLE DAMAGE TRADE - " + str(attack.reason)
+			return attack
 		return {
 			"kind": "hold",
-			"reason": "NO SAFE EXIT - refusing unprotected direct hit"
+			"reason": "NO SAFE EXIT - lethal or non-progressing trade refused"
 		}
 
 
