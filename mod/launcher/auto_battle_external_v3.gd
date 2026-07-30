@@ -500,10 +500,10 @@ func _choose_plan(controller) -> Dictionary:
 		if not consumable_protection.is_empty() and consumable_protection.get("target_controller", null) != controller and (bool(consumable_protection.saves_lethal) or bool(consumable_protection.prevents_health_damage)):
 			consumable_protection["reason"] = "SAVE COMPANION WITH ITEM - " + str(consumable_protection.reason)
 			return consumable_protection
-		return {
-			"kind": "handoff",
-			"reason": "COMPANION IN RED ZONE - yielding turn"
-		}
+		# A companion's red zone is a rescue priority, not a reason to throw
+		# away this safe hero's independent AP. Continue with normal safe damage
+		# or positioning; the threatened companion still receives its own turn
+		# before enemies act.
 
 	var rage_followup := _choose_rage_followup(controller, incoming)
 	if not rage_followup.is_empty():
