@@ -553,7 +553,7 @@ func _choose_plan(controller) -> Dictionary:
 
 
 func _attack_makes_progress(attack: Dictionary) -> bool:
-	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or bool(attack.get("fall", false)))
+	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or int(attack.get("traps_destroyed", 0)) > 0 or bool(attack.get("fall", false)))
 
 
 
@@ -1208,6 +1208,13 @@ func _candidate_targets(ability, start: Vector2i) -> Array[Vector2i]:
 		for targeting_cell in ability.get_targeting_cells_for_cell_attack(start, enemy_cell):
 			_candidate_append(cells, targeting_cell)
 
+	# Traps are attackable board objects. They must be candidate targets too,
+	# otherwise a fully safe board can still become an AFK stalemate.
+	if ability.get_is_ability_an_attack():
+		for trap_cell in _trap_cells():
+			_candidate_append(cells, trap_cell)
+			for targeting_cell in ability.get_targeting_cells_for_cell_attack(start, trap_cell):
+				_candidate_append(cells, targeting_cell)
 	if _ability_is_push(ability):
 		for object_cell in _pushable_cells():
 			_candidate_append(cells, object_cell)
@@ -1224,6 +1231,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var fall := false
 	var enemy_damage := 0
 	var enemy_push_hits := 0
+	var traps_destroyed := 0
 	var self_damage := 0
 	var removed_threat_controllers: Array = []
 	var killed_enemy_controllers: Array = []
@@ -1231,6 +1239,17 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var priority_enemy = _get_party_priority_enemy()
 	var hits_party_priority := false
 
+	var destroyed_trap_cells: Array[Vector2i] = []
+	if ability.get_is_ability_an_attack():
+		for selected_cell in selected_cells:
+			if _move_system.has_trap(selected_cell) and not destroyed_trap_cells.has(selected_cell):
+				destroyed_trap_cells.append(selected_cell)
+		# Some one-cell attacks report their target only through the target
+		# argument. The mechanical and term checks above have already proved it
+		# legal, so it is safe to recognize that direct trap hit.
+		if destroyed_trap_cells.is_empty() and _move_system.has_trap(target):
+			destroyed_trap_cells.append(target)
+	traps_destroyed = destroyed_trap_cells.size()
 	for cell in predicted_damage:
 		var target_object = _move_system.get_character(cell)
 		var damage: int = max(0, int(predicted_damage[cell]))
@@ -1282,6 +1301,8 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	# safety and AP it turns one action into two sources of progress.
 	if enemy_hit_count >= 2:
 		score += float(enemy_hit_count - 1) * 6500.0
+	if traps_destroyed > 0:
+		score += float(traps_destroyed) * 4000.0
 
 	var self_safe_after := not _is_cell_threatened(start, removed_threat_controllers)
 	var party_threats_before := _get_threatened_player_controllers([], controller, start).size()
@@ -1305,13 +1326,15 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	elif party_threats_after > party_threats_before:
 		score -= 30000.0
 
-	if enemy_damage <= 0 and enemy_push_hits <= 0 and not fall:
+	if enemy_damage <= 0 and enemy_push_hits <= 0 and traps_destroyed <= 0 and not fall:
 		score -= 900.0
 
 	var danger_text := "%s->%s" % ["RED" if self_threatened else "CLEAR", "CLEAR" if self_safe_after else "RED"]
 	var reason := "damage %d, targets %d, danger %s, party %d->%d, incoming %d->%d, AP %d" % [enemy_damage, enemy_hit_count, danger_text, party_threats_before, party_threats_after, current_incoming, max(0, incoming_after), cost]
 	if fall:
 		reason = "PUSH INTO FALL (%s)" % reason
+	elif traps_destroyed > 0:
+		reason = "BREAK TRAP x%d (%s)" % [traps_destroyed, reason]
 	elif enemy_push_hits > 0:
 		reason = "PUSH OBJECT INTO ENEMY x%d (%s)" % [enemy_push_hits, reason]
 	elif lethal:
@@ -1335,6 +1358,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		"self_damage": self_damage,
 		"enemy_damage": enemy_damage,
 		"enemy_push_hits": enemy_push_hits,
+		"traps_destroyed": traps_destroyed,
 		"enemy_hit_count": enemy_hit_count,
 		"killed_enemy_controllers": killed_enemy_controllers
 	}
@@ -1966,6 +1990,13 @@ func _stop_after_victory() -> void:
 	_log("victory detected - no end turn")
 
 
+
+func _trap_cells() -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	for cell in _move_system.get_used_cells():
+		if _move_system.has_trap(cell):
+			cells.append(cell)
+	return cells
 
 func _pushable_cells() -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
