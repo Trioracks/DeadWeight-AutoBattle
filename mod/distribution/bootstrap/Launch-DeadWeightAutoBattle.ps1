@@ -1,6 +1,7 @@
 param(
     [string]$GameDirectory = '',
-    [switch]$NoGameStart
+    [switch]$NoGameStart,
+    [switch]$Silent
 )
 
 # Stable bootstrap for Mod: Dead Weight. It is intentionally separate from the
@@ -230,7 +231,9 @@ try {
         $isIgnored = $null -ne $state -and [string]$state.ignoredVersion -ceq [string]$remote.version
         if ($remoteVersion -gt $installedVersion -and -not $isIgnored) {
             $script:Choice = 'install'
-            Show-UpdateNotice ([string]$remote.version)
+            if (-not $Silent) {
+                Show-UpdateNotice ([string]$remote.version)
+            }
             if ($script:Choice -eq 'skip') {
                 Write-UpdateState ([string]$remote.version) 'user-skipped'
                 Write-AutoLog "User skipped v$($remote.version)."
