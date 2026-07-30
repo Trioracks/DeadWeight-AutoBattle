@@ -22,6 +22,7 @@ var _enabled := false
 var _auto_preference := false
 var _battle_closing := false
 var _battle_ui_visible := false
+var _battle_waiting_for_first_player_turn := false
 var _battle_nonce := 0
 var _turn_running := false
 var _active_controller = null
@@ -101,19 +102,20 @@ func _bind_game() -> void:
 
 
 func _on_battle_ready() -> void:
-	# battle_ready is raised while the scene is still being built. Do not attach
-	# a CanvasLayer, inspect a controller, or submit an action in that window.
-	# The native game can safely finish its scene transition first.
+	# battle_ready is raised while the scene is still being built. Do not touch
+	# the CanvasLayer, controller, timers or action API in that transition. The
+	# first player_turn is the first reliable point at which the combat scene has
+	# completed its native setup.
 	_battle_closing = false
 	_battle_ui_visible = false
+	_battle_waiting_for_first_player_turn = true
 	_battle_round = 0
 	_round_hero_ids.clear()
 	_debug_lines.clear()
 	_enabled = false
 	_refresh_debug_label()
 	_battle_nonce += 1
-	_log("battle ready - waiting for stable combat scene")
-	_wait_for_stable_battle_ui.call_deferred(_battle_nonce, 0)
+	_log("battle ready - waiting for first player turn")
 
 
 func _wait_for_stable_battle_ui(battle_nonce: int, attempts: int) -> void:
@@ -143,6 +145,7 @@ func _wait_for_stable_battle_ui(battle_nonce: int, attempts: int) -> void:
 func _on_battle_end() -> void:
 	_battle_closing = true
 	_battle_ui_visible = false
+	_battle_waiting_for_first_player_turn = false
 	_battle_nonce += 1
 	_enabled = false
 	_debug_lines.clear()
@@ -269,6 +272,11 @@ func _on_player_turn(hero_id: int) -> void:
 		return
 	_track_battle_round(hero_id)
 	_log("player turn: hero %d | round %d" % [hero_id, _battle_round])
+	if _battle_waiting_for_first_player_turn:
+		_battle_waiting_for_first_player_turn = false
+		# The signal is emitted from native turn setup; let its queued UI work finish.
+		_wait_for_stable_battle_ui.call_deferred(_battle_nonce, 0)
+		return
 	if _enabled:
 		_start_active_player_turn.call_deferred()
 
