@@ -467,6 +467,7 @@ func _choose_plan(controller) -> Dictionary:
 	var safe_step := _choose_best_move(controller, incoming, true, true)
 	var safe_escape := _choose_best_move(controller, incoming, true, false, self_threatened)
 	var attack_then_escape := _choose_attack_then_safe_escape(controller, attack, incoming)
+	var route_clear := _choose_route_clear_action(controller, incoming)
 	var recovery_trade := _choose_kill_recovery_trade(controller, incoming)
 	var last_stand_step := _choose_last_stand_step_attack(controller, incoming)
 
@@ -505,6 +506,12 @@ func _choose_plan(controller) -> Dictionary:
 		if not safe_step.is_empty():
 			safe_step["reason"] = "ONLY SAFE DODGE - " + str(safe_step.reason)
 			return safe_step
+		# No route is currently open. A movable barrel/crate can be a tactical
+		# door: resolve the legal push first, then re-evaluate the board and use
+		# the remaining AP for the newly opened safe escape.
+		if not route_clear.is_empty():
+			route_clear["reason"] = "CLEAR ROUTE THEN ESCAPE - " + str(route_clear.reason)
+			return route_clear
 		if not consumable_offense.is_empty() and bool(consumable_offense.get("self_safe_after", false)):
 			consumable_offense["reason"] = "NO SAFE EXIT - CLEAR THREAT WITH ITEM - " + str(consumable_offense.reason)
 			return consumable_offense
@@ -607,9 +614,43 @@ func _choose_plan(controller) -> Dictionary:
 
 
 func _attack_makes_progress(attack: Dictionary) -> bool:
-	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or int(attack.get("traps_destroyed", 0)) > 0 or bool(attack.get("fall", false)))
+	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or int(attack.get("traps_destroyed", 0)) > 0 or int(attack.get("objects_repositioned", 0)) > 0 or bool(attack.get("fall", false)))
 
 
+
+# A push that moves or destroys a neutral object may open a lane that cannot be
+# traced until the animation has actually resolved. This is intentionally used
+# only when no currently-open safe escape remains and at least one AP survives.
+func _choose_route_clear_action(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var ap := int(controller.my_params.action_points)
+	var best := {}
+	var best_score := -INF
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or _is_consumable_ability(controller, ability) or not _ability_is_push(ability) or bool(ability.cost_end_turn):
+			continue
+		var cost := max(0, int(ability.get_final_ap_cost()))
+		if cost >= ap:
+			continue
+		for target: Vector2i in _candidate_targets(ability, start):
+			if not ability.can_mechanically_attack(start, target, false, false, false) or not ability.check_terms(start, target):
+				continue
+			var result := _score_attack(controller, ability, start, target, current_incoming)
+			var moved_objects := int(result.get("objects_repositioned", 0))
+			if moved_objects <= 0 or int(result.get("self_damage", 0)) > 0:
+				continue
+			var score := float(moved_objects) * 20000.0 + float(result.get("enemy_push_hits", 0)) * 9000.0
+			score += float(result.get("enemy_damage", 0)) * 650.0
+			if bool(result.get("fall", false)):
+				score += ENEMY_KILL_SCORE
+			if score <= best_score:
+				continue
+			best_score = score
+			best = result
+	return best
 
 func _choose_attack_then_safe_escape(controller, attack: Dictionary, current_incoming: int) -> Dictionary:
 	if attack.is_empty() or not _attack_makes_progress(attack):
@@ -1430,6 +1471,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var fall := false
 	var enemy_damage := 0
 	var enemy_push_hits := 0
+	var objects_repositioned := 0
 	var traps_destroyed := 0
 	var self_damage := 0
 	var removed_threat_controllers: Array = []
@@ -1478,6 +1520,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		score += float(push_result.score)
 		fall = bool(push_result.fall)
 		enemy_push_hits = int(push_result.enemy_impacts)
+		objects_repositioned = int(push_result.objects_moved)
 		if enemy_push_hits > 0:
 			score += float(enemy_push_hits) * 9000.0
 			for impacted_controller in push_result.impacted_enemy_controllers:
@@ -1502,6 +1545,8 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		score += float(enemy_hit_count - 1) * 6500.0
 	if traps_destroyed > 0:
 		score += float(traps_destroyed) * 4000.0
+	if objects_repositioned > 0:
+		score += float(objects_repositioned) * 1000.0
 
 	var self_safe_after := not _is_cell_threatened(start, removed_threat_controllers)
 	var party_threats_before := _get_threatened_player_controllers([], controller, start).size()
@@ -1525,13 +1570,15 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	elif party_threats_after > party_threats_before:
 		score -= 30000.0
 
-	if enemy_damage <= 0 and enemy_push_hits <= 0 and traps_destroyed <= 0 and not fall:
+	if enemy_damage <= 0 and enemy_push_hits <= 0 and traps_destroyed <= 0 and objects_repositioned <= 0 and not fall:
 		score -= 900.0
 
 	var danger_text := "%s->%s" % ["RED" if self_threatened else "CLEAR", "CLEAR" if self_safe_after else "RED"]
 	var reason := "damage %d, targets %d, danger %s, party %d->%d, incoming %d->%d, AP %d" % [enemy_damage, enemy_hit_count, danger_text, party_threats_before, party_threats_after, current_incoming, max(0, incoming_after), cost]
 	if fall:
 		reason = "PUSH INTO FALL (%s)" % reason
+	elif objects_repositioned > 0:
+		reason = "MOVE/BREAK OBJECT x%d (%s)" % [objects_repositioned, reason]
 	elif traps_destroyed > 0:
 		reason = "BREAK TRAP x%d (%s)" % [traps_destroyed, reason]
 	elif enemy_push_hits > 0:
@@ -1557,6 +1604,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		"self_damage": self_damage,
 		"enemy_damage": enemy_damage,
 		"enemy_push_hits": enemy_push_hits,
+		"objects_repositioned": objects_repositioned,
 		"traps_destroyed": traps_destroyed,
 		"enemy_hit_count": enemy_hit_count,
 		"killed_enemy_controllers": killed_enemy_controllers
@@ -1568,6 +1616,7 @@ func _score_push_falls(ability, start: Vector2i, target: Vector2i) -> Dictionary
 	var enemy_falls := 0
 	var object_falls := 0
 	var enemy_impacts := 0
+	var moved_objects: Array = []
 	var fallen_enemy_controllers: Array = []
 	var impacted_enemy_controllers: Array = []
 	var already_falling: Array = []
@@ -1593,6 +1642,8 @@ func _score_push_falls(ability, start: Vector2i, target: Vector2i) -> Dictionary
 					continue
 				if not _is_movable_push_object(pushed_object):
 					continue
+				if not moved_objects.has(pushed_object):
+					moved_objects.append(pushed_object)
 				for impacted_object in chain:
 					if impacted_object == null or not is_instance_valid(impacted_object):
 						continue
@@ -1630,6 +1681,7 @@ func _score_push_falls(ability, start: Vector2i, target: Vector2i) -> Dictionary
 		"fall": enemy_falls > 0,
 		"enemy_falls": enemy_falls,
 		"object_falls": object_falls,
+		"objects_moved": moved_objects.size(),
 		"enemy_impacts": enemy_impacts,
 		"fallen_enemy_controllers": fallen_enemy_controllers,
 		"impacted_enemy_controllers": impacted_enemy_controllers
