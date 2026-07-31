@@ -893,11 +893,26 @@ func _get_rage_kill_controllers(controller, melee: Dictionary, damage_bonus: int
 	var start: Vector2i = controller.controlled_object.obj_position
 	var target: Vector2i = melee.get("target", start)
 	var predicted_damage: Dictionary = ability.get_predicted_damage(start, target)
+	var damage_cells: Array = []
 	for cell in predicted_damage:
+		if not damage_cells.has(cell):
+			damage_cells.append(cell)
+	# Some direct weapon attacks expose only selected cells; keep a conservative
+	# one-target fallback so a real 1-damage hit plus Rage is not discarded.
+	if damage_cells.is_empty():
+		for cell in ability.get_selecting_cells(start, target):
+			if not damage_cells.has(cell):
+				damage_cells.append(cell)
+		if damage_cells.is_empty():
+			damage_cells.append(target)
+	for cell in damage_cells:
 		var target_object = _move_system.get_character(cell)
 		if target_object == null or not target_object.is_enemy_character() or target_object.my_params == null:
 			continue
-		var final_damage := max(0, int(predicted_damage[cell])) + damage_bonus
+		var base_damage := max(0, int(predicted_damage.get(cell, 0)))
+		if base_damage <= 0 and damage_cells.size() == 1:
+			base_damage = max(base_damage, int(melee.get("enemy_damage", 0)))
+		var final_damage := base_damage + damage_bonus
 		if final_damage >= int(target_object.my_params.hp) and target_object.my_controller != null and not killed.has(target_object.my_controller):
 			killed.append(target_object.my_controller)
 	return killed
@@ -924,6 +939,43 @@ func _choose_best_melee_attack_from_cell(controller, start: Vector2i, current_in
 	return best
 
 
+# A normal attack score is not a valid proxy for a Rage combo: the +damage may
+# make a lower-scored weapon target lethal. Enumerate every legal melee target.
+func _get_rage_kill_melee_options(controller, ultimate, start: Vector2i, current_incoming: int, available_ap: int) -> Array:
+	var options: Array = []
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or _is_consumable_ability(controller, ability) or not ability.get_is_ability_an_attack():
+			continue
+		if ability.ability_type != character_ability.ABILITY_TYPE.MELEE:
+			continue
+		var cost := max(0, int(ability.get_final_ap_cost()))
+		if cost > available_ap:
+			continue
+		var damage_bonus := _get_rage_damage_bonus(ultimate, ability)
+		if damage_bonus <= 0:
+			continue
+		for target: Vector2i in _candidate_targets(ability, start):
+			if not ability.can_mechanically_attack(start, target, false, false, false) or not ability.check_terms(start, target):
+				continue
+			var melee := _score_attack(controller, ability, start, target, current_incoming)
+			if int(melee.get("enemy_damage", 0)) <= 0 or int(melee.get("self_damage", 0)) > 0:
+				continue
+			var rage_kills := _get_rage_kill_controllers(controller, melee, damage_bonus)
+			var new_kills: Array = []
+			var base_kills: Array = melee.get("killed_enemy_controllers", [])
+			for killed_controller in rage_kills:
+				if not base_kills.has(killed_controller):
+					new_kills.append(killed_controller)
+			if new_kills.is_empty():
+				continue
+			options.append({
+				"melee": melee,
+				"damage_bonus": damage_bonus,
+				"rage_kills": rage_kills,
+				"new_kills": new_kills
+			})
+	return options
+
 func _choose_rage_ultimate(controller, current_incoming: int) -> Dictionary:
 	if controller == null or not is_instance_valid(controller):
 		return {}
@@ -945,52 +997,48 @@ func _choose_rage_ultimate(controller, current_incoming: int) -> Dictionary:
 			continue
 		if not ultimate.can_mechanically_attack(start, start, false, false, false) or not ultimate.check_terms(start, start):
 			continue
-		var melee := _choose_best_melee_attack_from_cell(controller, start, current_incoming, int(controller.my_params.action_points) - ap_cost)
-		if not _attack_makes_progress(melee) or bool(melee.lethal) or bool(melee.fall):
-			continue
-		var damage_bonus := _get_rage_damage_bonus(ultimate, melee.ability)
-		if damage_bonus <= 0:
-			continue
-		var rage_kills := _get_rage_kill_controllers(controller, melee, damage_bonus)
-		if rage_kills.is_empty():
-			continue
-		var safe_after_kill := not _is_cell_threatened(start, rage_kills)
-		var remaining_ap := int(controller.my_params.action_points) - ap_cost - max(0, int(melee.ability.get_final_ap_cost()))
-		var virtual_escape: Dictionary = {}
-		if not safe_after_kill and remaining_ap > 0:
-			virtual_escape = _choose_best_move(controller, current_incoming, true, false, true, remaining_ap, rage_kills)
-		# Under a current telegraph, do not consume Rage unless the resulting kill
-		# either removes it or leaves a concrete, trap-free exit after the weapon hit.
-		if _is_cell_threatened(start) and not safe_after_kill and virtual_escape.is_empty():
-			continue
-		var score := float(melee.score) + float(rage_kills.size()) * (ENEMY_KILL_SCORE + 22000.0) + float(damage_bonus) * 1800.0
-		if safe_after_kill:
-			score += 110000.0
-		elif not virtual_escape.is_empty():
-			score += 65000.0
-		if score <= best_score:
-			continue
-		best_score = score
-		var escape_text := ""
-		if not virtual_escape.is_empty():
-			escape_text = "; then escape to %s with %d AP" % [str(virtual_escape.target), int(virtual_escape.energy)]
-		best = {
-			"kind": "ultimate",
-			"ability": ultimate,
-			"target": start,
-			"score": score,
-			"self_safe_after": safe_after_kill,
-			"rage_has_safe_escape": not virtual_escape.is_empty(),
-			"rage_followup": {
-				"ability": melee.ability,
-				"target": melee.target,
-				"damage_bonus": damage_bonus,
-				"expected_kills": rage_kills.size()
-			},
-			"reason": "RAGE %d/%d, spend %d; +%d turns %s -> %s into guaranteed kill x%d%s" % [int(rage.current), int(rage.maximum), rage_cost, damage_bonus, str(melee.ability.tag), str(melee.target), rage_kills.size(), escape_text]
-		}
+		var candidates := _get_rage_kill_melee_options(controller, ultimate, start, current_incoming, int(controller.my_params.action_points) - ap_cost)
+		for candidate in candidates:
+			var melee: Dictionary = candidate.melee
+			var damage_bonus := int(candidate.damage_bonus)
+			var rage_kills: Array = candidate.rage_kills
+			var new_kills: Array = candidate.new_kills
+			var safe_after_kill := not _is_cell_threatened(start, rage_kills)
+			var remaining_ap := int(controller.my_params.action_points) - ap_cost - max(0, int(melee.ability.get_final_ap_cost()))
+			var virtual_escape: Dictionary = {}
+			if not safe_after_kill and remaining_ap > 0:
+				virtual_escape = _choose_best_move(controller, current_incoming, true, false, true, remaining_ap, rage_kills)
+			# Under a current telegraph, do not consume Rage unless the resulting kill
+			# either removes it or leaves a concrete, trap-free exit after the weapon hit.
+			if _is_cell_threatened(start) and not safe_after_kill and virtual_escape.is_empty():
+				continue
+			var score := float(melee.score) + float(new_kills.size()) * (ENEMY_KILL_SCORE + 60000.0) + float(rage_kills.size()) * 12000.0 + float(damage_bonus) * 1800.0
+			if safe_after_kill:
+				score += 110000.0
+			elif not virtual_escape.is_empty():
+				score += 65000.0
+			if score <= best_score:
+				continue
+			best_score = score
+			var escape_text := ""
+			if not virtual_escape.is_empty():
+				escape_text = "; then escape to %s with %d AP" % [str(virtual_escape.target), int(virtual_escape.energy)]
+			best = {
+				"kind": "ultimate",
+				"ability": ultimate,
+				"target": start,
+				"score": score,
+				"self_safe_after": safe_after_kill,
+				"rage_has_safe_escape": not virtual_escape.is_empty(),
+				"rage_followup": {
+					"ability": melee.ability,
+					"target": melee.target,
+					"damage_bonus": damage_bonus,
+					"expected_kills": rage_kills.size()
+				},
+				"reason": "RAGE %d/%d, spend %d; +%d turns %s -> %s into guaranteed new kill x%d%s" % [int(rage.current), int(rage.maximum), rage_cost, damage_bonus, str(melee.ability.tag), str(melee.target), new_kills.size(), escape_text]
+			}
 	return best
-
 
 func _choose_rage_followup(controller, current_incoming: int) -> Dictionary:
 	if controller == null or not is_instance_valid(controller) or int(controller.get_instance_id()) != _rage_followup_controller_id:
