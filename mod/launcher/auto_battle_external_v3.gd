@@ -461,6 +461,9 @@ func _choose_plan(controller) -> Dictionary:
 	# Rage is planned before ordinary movement: it may turn a one-damage melee
 	# strike into an immediate kill, and therefore opens a safe retreat.
 	var rage_ultimate := _choose_rage_ultimate(controller, incoming)
+	# This is deliberately separate from the generic dodge scorer: a ranged
+	# hero should choose a safe one-step firing position over a farther retreat.
+	var safe_hit_step := _choose_best_safe_move_for_hit(controller, incoming)
 	var safe_step := _choose_best_move(controller, incoming, true, true)
 	var safe_escape := _choose_best_move(controller, incoming, true, false, self_threatened)
 	var attack_then_escape := _choose_attack_then_safe_escape(controller, attack, incoming)
@@ -485,11 +488,11 @@ func _choose_plan(controller) -> Dictionary:
 			return attack_then_escape
 
 		# A short dodge is worthwhile only if it immediately creates a real hit.
-		# Otherwise spend the whole movement budget to leave the enemy's two-cell follow-up.
-		var escape_follow_up: Dictionary = safe_step.get("follow_up", {}) if not safe_step.is_empty() else {}
-		if not safe_step.is_empty() and _attack_makes_progress(escape_follow_up):
-			safe_step["reason"] = "DODGE THEN HIT - " + str(safe_step.reason)
-			return safe_step
+		# The dedicated selector preserves the exact firing square instead of
+		# letting a generic safety score choose a farther, inactive retreat.
+		if not safe_hit_step.is_empty():
+			safe_hit_step["reason"] = "DODGE THEN HIT - " + str(safe_hit_step.reason)
+			return safe_hit_step
 		# Vitality is a verified, renewable resource: trade one direct point only
 		# when this exact hero can kill the sole adjacent attacker next turn and
 		# restore every point that it intentionally accepts.
@@ -571,12 +574,12 @@ func _choose_plan(controller) -> Dictionary:
 	if not rage_ultimate.is_empty():
 		return rage_ultimate
 
-	# From a safe cell, take any one-AP move that produces real damage this turn.
-	# It is the fastest pattern: dodge, step in, hit, then inspect the next telegraph.
-	var move_follow_up: Dictionary = safe_step.get("follow_up", {}) if not safe_step.is_empty() else {}
-	if not safe_step.is_empty() and _attack_makes_progress(move_follow_up) and (attack.is_empty() or not bool(attack.lethal) and not bool(attack.fall)):
-		safe_step["reason"] = "STEP FOR SAFE HIT - " + str(safe_step.reason)
-		return safe_step
+	# From a safe cell, take any move that preserves enough AP for a real hit.
+	# This picks the firing square itself (for example, one step down then shot)
+	# rather than a generic movement destination.
+	if not safe_hit_step.is_empty() and (attack.is_empty() or not bool(attack.lethal) and not bool(attack.fall)):
+		safe_hit_step["reason"] = "STEP FOR SAFE HIT - " + str(safe_hit_step.reason)
+		return safe_hit_step
 
 	# Immediate kills/falls stay ahead of buffs and positioning.
 	if not attack.is_empty() and (bool(attack.lethal) or bool(attack.fall)):
@@ -1656,6 +1659,60 @@ func _is_ahead_on_push_line(from: Vector2i, to: Vector2i, direction: Vector2i) -
 	elif signi(delta.y) != direction.y:
 		return false
 	return true
+
+# Finds a safe movement destination only among cells that leave enough energy for
+# an immediately legal attack. It prevents a generic escape score from making a
+# ranger abandon a one-step firing opportunity.
+func _choose_best_safe_move_for_hit(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var params = controller.my_params
+	var ap := int(params.action_points)
+	if ap <= 0:
+		return {}
+	var spurt_data = params.get_detailed_spurt_data()
+	var ignores_traps := _hero_ignores_traps(params)
+	var best := {}
+	var best_score := -INF
+	for cell in _move_system.get_used_cells():
+		if cell == start or _move_system.has_character(cell) or _move_system.can_fall_from_cell(cell):
+			continue
+		if _move_system.is_obstancle_cell(cell) or (_move_system.has_trap(cell) and not ignores_traps):
+			continue
+		var trace = controller._trace_motion_path(start, cell, spurt_data)
+		if trace == null or not trace.has_valid_path():
+			continue
+		var path: Array = trace.get_front_motion_path()
+		var move_cost := int(trace.energy)
+		if path.is_empty() or move_cost >= ap:
+			continue
+		if not ignores_traps and _movement_trace_steps_on_trap(trace, start):
+			continue
+		var cell_incoming := _incoming_damage_at(cell)
+		if _is_cell_threatened(cell):
+			continue
+		var follow_up := _choose_best_attack_from_cell(controller, cell, cell_incoming, ap - move_cost)
+		if not _attack_makes_progress(follow_up) or int(follow_up.get("self_damage", 0)) > 0:
+			continue
+		var score := float(follow_up.get("score", -INF))
+		score += float(follow_up.get("enemy_hit_count", 0)) * 5000.0
+		if bool(follow_up.get("lethal", false)) or bool(follow_up.get("fall", false)):
+			score += 30000.0
+		score -= float(move_cost) * 50.0
+		score -= float(_edge_risk(cell)) * 250.0
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"kind": "move",
+			"target": cell,
+			"score": score,
+			"follow_up": follow_up,
+			"reason": "SAFE HIT POSITION %s, path %d, move AP %d, then %s -> %s" % [str(cell), path.size(), move_cost, str(follow_up.ability.tag), str(follow_up.target)]
+		}
+	return best
 
 func _choose_best_move(controller, current_incoming: int, require_safe: bool = false, one_ap_only: bool = false, flee: bool = false, ap_budget: int = -1, excluded_threat_controllers: Array = []) -> Dictionary:
 	var hero = controller.controlled_object
