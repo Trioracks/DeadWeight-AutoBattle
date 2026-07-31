@@ -11,18 +11,16 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $distribution = Join-Path $projectRoot 'mod\distribution'
 $launcherSource = Join-Path $projectRoot 'mod\launcher'
 $releaseRoot = Join-Path $OutputRoot "v$Version"
-$runtimePackageName = "DeadWeight_AutoBattle_Runtime_v$Version.zip"
-$installerPackageName = "DeadWeight_AutoBattle_v$Version.zip"
+$installerPackageName = "DeadWeight_AUTO_Battle_Install_v$Version.zip"
 $runtimeStage = Join-Path $releaseRoot 'runtime-package'
 $installerStage = Join-Path $releaseRoot 'installer-package'
-$runtimeZip = Join-Path $releaseRoot $runtimePackageName
 $installerZip = Join-Path $releaseRoot $installerPackageName
-$releaseManifest = Join-Path $releaseRoot 'deadweight-autobattle-update.json'
+$installerVerify = Join-Path $releaseRoot 'installer-verify'
 
 Remove-Item -LiteralPath $releaseRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $runtimeStage, $installerStage | Out-Null
 
-# The downloadable runtime contains only scripts written for the mod. No game
+# The installed runtime contains only scripts written for the mod. No game
 # binary, PCK, save or original asset is ever included in a release.
 $runtimeRoot = Join-Path $runtimeStage 'runtime'
 $runtimeLaunchers = Join-Path $runtimeRoot 'launcher'
@@ -40,18 +38,6 @@ if (-not $runtimeTacticsText.Contains($versionToken)) { throw 'Runtime tactics s
     channel = 'stable'
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runtimeRoot 'version.json') -Encoding UTF8
 
-Compress-Archive -LiteralPath $runtimeRoot -DestinationPath $runtimeZip -CompressionLevel Optimal
-$runtimeHash = (Get-FileHash -LiteralPath $runtimeZip -Algorithm SHA256).Hash
-
-$manifest = [ordered]@{
-    schemaVersion = 1
-    version = $Version
-    package = $runtimePackageName
-    sha256 = $runtimeHash
-    url = "https://github.com/Trioracks/DeadWeight-AutoBattle/releases/download/v$Version/$runtimePackageName"
-}
-$manifest | ConvertTo-Json | Set-Content -LiteralPath $releaseManifest -Encoding UTF8
-
 Copy-Item -LiteralPath (Join-Path $distribution 'Install-DeadWeightAutoBattle.ps1') -Destination $installerStage -Force
 Copy-Item -LiteralPath (Join-Path $distribution 'Install-DeadWeightAutoBattle.cmd') -Destination $installerStage -Force
 Copy-Item -LiteralPath (Join-Path $distribution 'Launch via Steam.cmd') -Destination $installerStage -Force
@@ -63,16 +49,18 @@ foreach ($documentation in @('README.md', 'README_EN.md')) {
 }
 Compress-Archive -Path (Join-Path $installerStage '*') -DestinationPath $installerZip -CompressionLevel Optimal
 
-Expand-Archive -LiteralPath $runtimeZip -DestinationPath (Join-Path $releaseRoot 'runtime-verify') -Force
-Expand-Archive -LiteralPath $installerZip -DestinationPath (Join-Path $releaseRoot 'installer-verify') -Force
+Expand-Archive -LiteralPath $installerZip -DestinationPath $installerVerify -Force
 $required = @(
+    'Install-DeadWeightAutoBattle.ps1',
+    'Install-DeadWeightAutoBattle.cmd',
+    'bootstrap\Launch-DeadWeightAutoBattle.ps1',
     'runtime\version.json',
     'runtime\launcher\dead_weight_auto_launcher.gd',
     'runtime\launcher\auto_battle_external_v3.gd'
 )
 foreach ($relative in $required) {
-    if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $releaseRoot 'runtime-verify') $relative))) {
-        throw "Runtime package verification failed: missing $relative"
+    if (-not (Test-Path -LiteralPath (Join-Path $installerVerify $relative))) {
+        throw "Installer package verification failed: missing $relative"
     }
 }
 foreach ($name in @('Dead_weight.exe', 'Dead_weight.console.exe', 'GameAnalytics.dll', 'GameAssembly.dll')) {
@@ -80,8 +68,5 @@ foreach ($name in @('Dead_weight.exe', 'Dead_weight.console.exe', 'GameAnalytics
 }
 
 $installerHash = (Get-FileHash -LiteralPath $installerZip -Algorithm SHA256).Hash
-Write-Host "Runtime package: $runtimeZip"
-Write-Host "Runtime SHA-256: $runtimeHash"
-Write-Host "Installer package: $installerZip"
+Write-Host "User installer: $installerZip"
 Write-Host "Installer SHA-256: $installerHash"
-Write-Host "Update manifest: $releaseManifest"

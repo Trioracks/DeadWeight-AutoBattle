@@ -10,7 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:ProjectName = 'Mod: Dead Weight - AUTO Battle'
-$script:ManifestUrl = 'https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest/download/deadweight-autobattle-update.json'
+$script:ReleaseApiUrl = 'https://api.github.com/repos/Trioracks/DeadWeight-AutoBattle/releases/latest'
 $script:ModRoot = Split-Path -Parent $PSScriptRoot
 $script:StatePath = Join-Path $script:ModRoot 'update-state.json'
 $script:LogPath = Join-Path $script:ModRoot 'AutoBattle.update.log'
@@ -59,29 +59,31 @@ function Get-InstalledVersion {
     catch { return [Version]'0.0.0' }
 }
 
-function Test-RemoteManifest($Manifest) {
-    if ($null -eq $Manifest) { throw 'The official update manifest is empty.' }
-    if ([int]$Manifest.schemaVersion -ne 1) { throw "Unsupported update manifest schema: $($Manifest.schemaVersion)." }
-    if ([string]::IsNullOrWhiteSpace([string]$Manifest.version)) { throw 'The update manifest has no version.' }
-    try { [void]([Version]([string]$Manifest.version)) }
-    catch { throw "The update version is invalid: $($Manifest.version)." }
-    $expectedPackage = "DeadWeight_AutoBattle_Runtime_v$($Manifest.version).zip"
-    if ([string]$Manifest.package -cne $expectedPackage) { throw 'The update package name does not match the fixed AUTO Battle layout.' }
-    if ([string]$Manifest.sha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'The update package hash is missing or malformed.' }
-    if ([string]::IsNullOrWhiteSpace([string]$Manifest.url)) { throw 'The update package URL is missing.' }
-}
-
-function Get-RemoteManifest {
+function Get-RemoteReleaseInfo {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $response = Invoke-WebRequest -Uri $script:ManifestUrl -UseBasicParsing -TimeoutSec 6 -Headers @{ 'User-Agent' = 'DeadWeight-AutoBattle/1' }
-    $json = if ($response.Content -is [byte[]]) {
-        [Text.Encoding]::UTF8.GetString([byte[]]$response.Content)
-    } else {
-        [string]$response.Content
-    }
-    return (($json.TrimStart([char]0xFEFF)) | ConvertFrom-Json)
-}
+    $release = Invoke-RestMethod -Uri $script:ReleaseApiUrl -TimeoutSec 8 -Headers @{ 'User-Agent' = 'DeadWeight-AutoBattle/1'; 'Accept' = 'application/vnd.github+json' }
+    if ($null -eq $release -or [bool]$release.draft -or [bool]$release.prerelease) { throw 'The official GitHub release is unavailable.' }
 
+    $tag = [string]$release.tag_name
+    if ($tag.StartsWith('v')) { $tag = $tag.Substring(1) }
+    try { [void]([Version]$tag) }
+    catch { throw "The release tag is not a valid AUTO Battle version: $($release.tag_name)." }
+
+    $packageName = "DeadWeight_AUTO_Battle_Install_v$tag.zip"
+    $asset = @($release.assets | Where-Object { [string]$_.name -ceq $packageName } | Select-Object -First 1)
+    if ($asset.Count -ne 1) { throw "The official release does not contain $packageName." }
+    if ([string]::IsNullOrWhiteSpace([string]$asset[0].browser_download_url)) { throw 'The official installer URL is missing.' }
+
+    $digestMatch = [regex]::Match([string]$asset[0].digest, '^sha256:(?<hash>[A-Fa-f0-9]{64})$')
+    if (-not $digestMatch.Success) { throw 'GitHub did not provide a valid SHA-256 digest for the official installer.' }
+
+    return [pscustomobject]@{
+        version = $tag
+        package = [string]$asset[0].name
+        sha256 = $digestMatch.Groups['hash'].Value
+        url = [string]$asset[0].browser_download_url
+    }
+}
 function Test-Sha256([string]$Path, [string]$Expected) {
     return ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ceq $Expected.ToUpperInvariant())
 }
@@ -156,19 +158,19 @@ function Show-UpdateNotice([string]$Version) {
     }
 }
 
-function Install-RuntimeUpdate($Manifest) {
+function Install-RuntimeUpdate($Release) {
     $workRoot = Join-Path $script:ModRoot '.update-work'
-    $staging = Join-Path $workRoot ("v$($Manifest.version)-" + [guid]::NewGuid().ToString('N'))
-    $zipPath = Join-Path $staging ([string]$Manifest.package)
+    $staging = Join-Path $workRoot ("v$($Release.version)-" + [guid]::NewGuid().ToString('N'))
+    $zipPath = Join-Path $staging ([string]$Release.package)
     $expanded = Join-Path $staging 'expanded'
     $target = Join-Path $script:ModRoot 'runtime'
     $backup = "$target.previous-" + [guid]::NewGuid().ToString('N')
     $targetMoved = $false
     try {
         New-Item -ItemType Directory -Force -Path $staging | Out-Null
-        Write-AutoLog "Downloading v$($Manifest.version) from the official GitHub release."
-        Invoke-WebRequest -Uri ([string]$Manifest.url) -OutFile $zipPath -UseBasicParsing -TimeoutSec 45 -Headers @{ 'User-Agent' = 'DeadWeight-AutoBattle/1' }
-        if (-not (Test-Sha256 $zipPath ([string]$Manifest.sha256))) { throw 'Downloaded package SHA-256 does not match the official manifest.' }
+        Write-AutoLog "Downloading v$($Release.version) from the official GitHub release."
+        Invoke-WebRequest -Uri ([string]$Release.url) -OutFile $zipPath -UseBasicParsing -TimeoutSec 45 -Headers @{ 'User-Agent' = 'DeadWeight-AutoBattle/1' }
+        if (-not (Test-Sha256 $zipPath ([string]$Release.sha256))) { throw 'Downloaded installer SHA-256 does not match the official GitHub release.' }
 
         Expand-Archive -LiteralPath $zipPath -DestinationPath $expanded -Force
         $newRuntime = Join-Path $expanded 'runtime'
@@ -179,7 +181,7 @@ function Install-RuntimeUpdate($Manifest) {
             throw 'Update package does not contain the expected runtime layout.'
         }
         $packageVersion = Read-JsonFile $versionPath
-        if ($null -eq $packageVersion -or [string]$packageVersion.version -cne [string]$Manifest.version) {
+        if ($null -eq $packageVersion -or [string]$packageVersion.version -cne [string]$Release.version) {
             throw 'Runtime version does not match the requested official release.'
         }
 
@@ -190,7 +192,7 @@ function Install-RuntimeUpdate($Manifest) {
         Move-Item -LiteralPath $newRuntime -Destination $target -Force
         if ($targetMoved) { Remove-Item -LiteralPath $backup -Recurse -Force }
         Remove-UpdateState
-        Write-AutoLog "Installed AUTO Battle v$($Manifest.version); only the mod runtime was replaced."
+        Write-AutoLog "Installed AUTO Battle v$($Release.version); only the mod runtime was replaced."
         return $true
     } catch {
         if ($targetMoved -and -not (Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $backup)) {
@@ -229,8 +231,7 @@ try {
     $GameDirectory = [IO.Path]::GetFullPath($GameDirectory)
     $installedVersion = Get-InstalledVersion
     try {
-        $remote = Get-RemoteManifest
-        Test-RemoteManifest $remote
+        $remote = Get-RemoteReleaseInfo
         $remoteVersion = [Version]([string]$remote.version)
         $state = Read-JsonFile $script:StatePath
         $isIgnored = $null -ne $state -and [string]$state.ignoredVersion -ceq [string]$remote.version

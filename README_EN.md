@@ -6,7 +6,7 @@ A Windows test build of AUTO Battle for the Steam version of **Dead Weight**. Th
 
 ## Player installation
 
-1. Download `DeadWeight_AutoBattle_vX.Y.Z.zip` from the [latest release](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest).
+1. Download `DeadWeight_AUTO_Battle_Install_vX.Y.Z.zip` from the [latest release](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest).
 2. Extract it anywhere temporary and double-click `Install-DeadWeightAutoBattle.cmd`.
 3. The installer automatically searches **every** Steam library on the user's machine, including libraries on other drives. If Steam cannot locate the game, it asks to choose the folder that contains `Dead_weight.exe`. It creates `DeadWeightAutoBattle` next to the game and copies the Steam launch command to the clipboard.
 4. In Steam, open **Dead Weight -> Properties -> Launch Options**, press `Ctrl+V`, then close the window. This is the only manual step required for the Steam **Play** button to use the mod.
@@ -17,9 +17,9 @@ The installer also creates a `Dead Weight - AUTO Battle` desktop shortcut. It is
 
 No manual downloads are needed after the first installation. Every launch through the Steam launcher:
 
-1. reads a manifest from the official GitHub release only;
+1. reads the version of the latest official GitHub release;
 2. when a newer version exists, shows its version and **Update now** / **Skip this version**;
-3. downloads the package, verifies SHA-256, and replaces only `DeadWeightAutoBattle\runtime`;
+3. downloads that same installer archive, verifies the SHA-256 supplied by GitHub, and replaces only `DeadWeightAutoBattle\runtime`;
 4. starts the game automatically.
 
 If GitHub is unavailable, a hash does not match, or an update is interrupted, the existing runtime is kept and starts normally. Saves and original game files are never changed.
