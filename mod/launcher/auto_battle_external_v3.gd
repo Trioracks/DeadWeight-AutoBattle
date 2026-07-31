@@ -804,7 +804,7 @@ func _get_direct_damage_attackers(cell: Vector2i) -> Dictionary:
 		var prepared_action = enemy_controller.get_prepared_ability_action()
 		if prepared_action == null:
 			continue
-		var hit := max(0, int(prepared_action.get_predicted_damage_on_cell(cell)))
+		var hit := _prepared_action_damage_on_cell(prepared_action, cell)
 		if hit <= 0:
 			continue
 		controllers.append(enemy_controller)
@@ -2153,7 +2153,7 @@ func _incoming_damage_at(cell: Vector2i, excluded_controllers: Array = []) -> in
 			continue
 		var prepared_action = enemy_controller.get_prepared_ability_action()
 		if prepared_action != null:
-			damage += int(prepared_action.get_predicted_damage_on_cell(cell))
+			damage += _prepared_action_damage_on_cell(prepared_action, cell)
 	for delayed_activator in _battle_system.delayed_activators:
 		if delayed_activator != null:
 			damage += int(delayed_activator.get_damage_on_cell(cell))
@@ -2214,6 +2214,31 @@ func _prepared_action_marks_cell(prepared_action, cell: Vector2i) -> bool:
 	return false
 
 
+# Prepared multi-cell attacks can report zero through
+# get_predicted_damage_on_cell() for a tail cell even though the game paints
+# that cell as part of the incoming attack. Do not let a missing numeric value
+# turn a visible telegraph into a safe square: use the full ability prediction
+# first, then reserve one point for a marked-but-unreported cell. One is the
+# lowest non-zero damage in Dead Weight and makes the planner dodge it instead
+# of spending its last AP on an apparently safe position.
+func _prepared_action_damage_on_cell(prepared_action, cell: Vector2i) -> int:
+	if prepared_action == null:
+		return 0
+	var reported_damage := max(0, int(prepared_action.get_predicted_damage_on_cell(cell)))
+	if reported_damage > 0:
+		return reported_damage
+	if not _prepared_action_marks_cell(prepared_action, cell):
+		return 0
+	var ability = prepared_action.prepared_ability
+	var source = prepared_action.assigned_character
+	if ability != null and source != null and source.is_alive() and prepared_action.has_method("_get_actual_target"):
+		var predicted_damage: Dictionary = ability.get_predicted_damage(source.obj_position, prepared_action._get_actual_target())
+		var full_prediction := max(0, int(predicted_damage.get(cell, 0)))
+		if full_prediction > 0:
+			return full_prediction
+	return 1
+
+
 func _get_threatened_player_controllers(excluded_controllers: Array = [], position_override_controller = null, position_override: Vector2i = Vector2i.ZERO) -> Array:
 	var threatened: Array = []
 	if _turns == null:
@@ -2252,13 +2277,11 @@ func _get_party_priority_enemy():
 				if player_controller == null or player_controller.controlled_object == null or not player_controller.controlled_object.is_alive():
 					continue
 				var player = player_controller.controlled_object
-				var damage := int(prepared_action.get_predicted_damage_on_cell(player.obj_position))
+				var damage := _prepared_action_damage_on_cell(prepared_action, player.obj_position)
 				if damage > 0:
 					score += float(damage) * 750.0
 					if damage >= int(player.my_params.hp):
 						score += 12000.0
-				elif _prepared_action_marks_cell(prepared_action, player.obj_position):
-					score += 900.0
 		if score > best_score:
 			best_score = score
 			best_enemy = enemy

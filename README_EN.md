@@ -31,6 +31,7 @@ AUTO uses available game controllers, so the game itself applies energy costs, c
 
 - shows the button only in combat;
 - evaluates next-turn danger cells, traps, map edges, health and energy for the whole party;
+- treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
 - prefers safe kills, pushes into a fall, and multi-target attacks;
 - may keep energy and end on a safe cell instead of returning into an attack;
 - reads abilities, talents, some equipment and available consumables;

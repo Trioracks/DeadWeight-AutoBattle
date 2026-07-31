@@ -31,6 +31,7 @@ If the network is unavailable or verification fails, the installed version stays
 ## AUTO behaviour
 
 - evaluates future attack cells, traps, map edges, health and energy for the whole party;
+- treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
 - looks for safe kills, pushes into a fall and attacks hitting multiple enemies;
 - does not spend energy to step back into danger when already safe;
 - considers available abilities, some talents, equipment and consumables;
