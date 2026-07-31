@@ -946,7 +946,7 @@ func _get_rage_kill_controllers(controller, melee: Dictionary, damage_bonus: int
 		var base_damage := max(0, int(predicted_damage.get(cell, 0)))
 		if base_damage <= 0 and damage_cells.size() == 1:
 			base_damage = max(base_damage, int(melee.get("enemy_damage", 0)))
-		var final_damage := base_damage + damage_bonus
+		var final_damage: int = base_damage + int(damage_bonus)
 		if final_damage >= int(target_object.my_params.hp) and target_object.my_controller != null and not killed.has(target_object.my_controller):
 			killed.append(target_object.my_controller)
 	return killed
@@ -1038,7 +1038,7 @@ func _choose_rage_ultimate(controller, current_incoming: int) -> Dictionary:
 			var rage_kills: Array = candidate.rage_kills
 			var new_kills: Array = candidate.new_kills
 			var safe_after_kill := not _is_cell_threatened(start, rage_kills)
-			var remaining_ap := int(controller.my_params.action_points) - ap_cost - max(0, int(melee.ability.get_final_ap_cost()))
+			var remaining_ap: int = int(controller.my_params.action_points) - int(ap_cost) - max(0, int(melee.ability.get_final_ap_cost()))
 			var virtual_escape: Dictionary = {}
 			if not safe_after_kill and remaining_ap > 0:
 				virtual_escape = _choose_best_move(controller, current_incoming, true, false, true, remaining_ap, rage_kills)
