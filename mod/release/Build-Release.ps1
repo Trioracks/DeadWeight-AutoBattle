@@ -68,5 +68,19 @@ foreach ($name in @('Dead_weight.exe', 'Dead_weight.console.exe', 'GameAnalytics
 }
 
 $installerHash = (Get-FileHash -LiteralPath $installerZip -Algorithm SHA256).Hash
+
+# Compatibility bridge for launchers installed before v0.1.18. They expect
+# this fixed manifest name and a runtime-named package, but download the same
+# single user installer ZIP and extract only its runtime folder.
+$legacyManifest = Join-Path $releaseRoot 'deadweight-autobattle-update.json'
+[ordered]@{
+    schemaVersion = 1
+    version = $Version
+    package = "DeadWeight_AutoBattle_Runtime_v$Version.zip"
+    sha256 = $installerHash
+    url = "https://github.com/Trioracks/DeadWeight-AutoBattle/releases/download/v$Version/$installerPackageName"
+} | ConvertTo-Json | Set-Content -LiteralPath $legacyManifest -Encoding UTF8
+
 Write-Host "User installer: $installerZip"
 Write-Host "Installer SHA-256: $installerHash"
+Write-Host "Legacy updater bridge: $legacyManifest"

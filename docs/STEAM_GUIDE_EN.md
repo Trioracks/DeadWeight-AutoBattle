@@ -1,56 +1,53 @@
-# AUTO Battle mod for Dead Weight | EN / RU
+# AUTO Battle — Dead Weight mod | EN
 
-## What it is
+**Mod: Dead Weight — AUTO Battle** adds an `AUTO` button in the top-right corner during combat only. A bright button means AUTO is on; grey means off. The setting is remembered for the next battle.
 
-**Mod: Dead Weight - AUTO Battle** adds an `AUTO` button to the top HUD only while in combat. Bright means AUTO is ON; grey means OFF. The preference persists into the next encounter.
+[Download latest version](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest) | [Source code](https://github.com/Trioracks/DeadWeight-AutoBattle)
 
-[Download latest release](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest) | [Source code](https://github.com/Trioracks/DeadWeight-AutoBattle)
+## Install once
 
-## One-time installation
+> On the release page, download **only the ZIP** named `DeadWeight_AUTO_Battle_Install_vX.Y.Z.zip`.
+> `deadweight-autobattle-update.json` is a tiny compatibility bridge for already-installed older versions. Do not download or open it manually.
 
-1. Download `DeadWeight_AutoBattle_v0.1.0.zip` from the latest GitHub release.
-2. Extract it to any temporary folder.
+1. Download the only ZIP, `DeadWeight_AUTO_Battle_Install_vX.Y.Z.zip`.
+2. Extract it anywhere temporary.
 3. Double-click `Install-DeadWeightAutoBattle.cmd`.
-4. If the Steam game is not found automatically, select the folder containing `Dead_weight.exe`.
-5. The installer copies a ready Steam launch command. In Steam, open **Dead Weight -> Properties -> Launch Options** and press `Ctrl+V`.
-6. Use Steam's normal **Play** button.
+4. The installer finds Dead Weight in every Steam library on any drive. If it cannot, select the game folder containing `Dead_weight.exe`.
+5. The installer copies the launch command. In Steam, open **Dead Weight → Properties → Launch Options** and press `Ctrl+V`.
+6. Use Steam’s ordinary **Play** button.
 
-The installer also creates a `Dead Weight - AUTO Battle` desktop shortcut.
+The installer also creates a fallback desktop shortcut named `Dead Weight — AUTO Battle`.
+
+## Existing older installations
+
+If the mod was installed before v0.1.18, start Steam once with the existing launch option. The small compatibility JSON automatically moves the old setup to the new format. If no update appears, simply run the new ZIP installer once; saves and game files are never touched.
 
 ## Automatic updates
 
-After the first setup, no manual downloads are needed. Before every launch, the launcher checks the official GitHub release. When there is a newer version, a window offers to update immediately or skip that version. The package is SHA-256 checked, only `DeadWeightAutoBattle\runtime` is replaced, then the game starts automatically.
+After installation, no manual download is needed. Before the game starts, the launcher checks the latest official GitHub release. A new version is downloaded from the installer ZIP, verified with SHA-256, then only `DeadWeightAutoBattle\runtime` is replaced before the game starts.
 
-If the network is unavailable or verification fails, the installed version is preserved and starts normally. Saves and original Dead Weight files are never touched.
+If the network is unavailable or verification fails, the installed version stays in place and starts normally.
 
 ## AUTO behaviour
 
-- evaluates future attack cells, traps, map edges, health and energy for the party;
-- prefers safe lethal attacks, pushes into a fall and attacks that hit multiple enemies;
-- avoids spending energy to step back into danger when already safe;
-- considers available abilities, some talents/equipment and consumables;
-- never automatically presses escape or any run-ending control.
+- evaluates future attack cells, traps, map edges, health and energy for the whole party;
+- looks for safe kills, pushes into a fall and attacks hitting multiple enemies;
+- does not spend energy to step back into danger when already safe;
+- considers available abilities, some talents, equipment and consumables;
+- never automatically presses escape, main menu or any run-ending control.
 
-The mod is a test build. If a decision is questionable, switch AUTO off from the top-right button and continue manually.
+This is a test mod. If a decision looks questionable, turn AUTO off with the top-right button and continue manually.
 
 ## Feedback
 
-Send the author a full combat screenshot with the AUTO button visible, concise reproduction steps and the expected action. For install/update issues, include `DeadWeightAutoBattle\AutoBattle.update.log`.
+Send the author via Steam chat:
+
+- a full battle screenshot with AUTO and AUTO DEBUG visible;
+- a short description of the expected action;
+- `DeadWeightAutoBattle\AutoBattle.update.log` for startup or updater issues.
 
 [Feedback template](https://github.com/Trioracks/DeadWeight-AutoBattle/blob/main/docs/FEEDBACK_EN.md)
 
-## Русский
+## Support the author
 
-**Mod: Dead Weight - AUTO Battle** добавляет кнопку `AUTO` только во время боя. Яркая — включено, серая — выключено; состояние запоминается на следующий бой.
-
-1. Скачайте `DeadWeight_AutoBattle_v0.1.0.zip` из [последнего GitHub-релиза](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest).
-2. Распакуйте и запустите `Install-DeadWeightAutoBattle.cmd`.
-3. При необходимости укажите папку с `Dead_weight.exe`.
-4. Установщик копирует команду запуска Steam. Откройте **Dead Weight -> Свойства -> Параметры запуска** и нажмите `Ctrl+V`.
-5. Дальше используйте обычную кнопку **Играть**.
-
-Перед запуском мод сам проверяет GitHub. Новая версия сверяется по SHA-256, заменяет только runtime мода и запускает игру; сохранения и игровые файлы не меняются.
-
-## Support the author / Поддержать автора
-
-If the mod is useful, support further work on [Boosty](https://boosty.to/gobelen).
+If this mod is useful, you can support further development on [Boosty](https://boosty.to/gobelen).

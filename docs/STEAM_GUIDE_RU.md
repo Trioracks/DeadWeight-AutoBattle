@@ -1,58 +1,53 @@
-# AUTO Battle - мод на автобой для Dead Weight | RU / EN
+# AUTO Battle — мод на автобой для Dead Weight | RU
 
-## Что это
+**Mod: Dead Weight — AUTO Battle** добавляет кнопку `AUTO` в правый верхний угол только во время боя. Яркая кнопка — автобой включён, серая — выключен. Выбор запоминается для следующего боя.
 
-**Mod: Dead Weight - AUTO Battle** добавляет кнопку `AUTO` в верхней части HUD только во время боя. Яркая кнопка — автобой включён, серая — выключен. Выбор сохраняется: если AUTO был включён в предыдущем бою, он включится и в следующем.
+[Скачать последнюю версию](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest) | [Исходный код](https://github.com/Trioracks/DeadWeight-AutoBattle)
 
-[Скачать последнюю версию на GitHub](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest) | [Исходный код](https://github.com/Trioracks/DeadWeight-AutoBattle)
+## Установка — один раз
 
-## Установка один раз
+> На странице релиза скачивайте **только ZIP** с названием `DeadWeight_AUTO_Battle_Install_vX.Y.Z.zip`.
+> Файл `deadweight-autobattle-update.json` — служебный мост для уже установленных старых версий; его не нужно скачивать или открывать вручную.
 
-1. Скачайте `DeadWeight_AutoBattle_v0.1.0.zip` из последнего GitHub-релиза.
+1. Скачайте единственный ZIP `DeadWeight_AUTO_Battle_Install_vX.Y.Z.zip`.
 2. Распакуйте его в любую временную папку.
 3. Запустите `Install-DeadWeightAutoBattle.cmd` двойным щелчком.
-4. Если Steam-версия не найдена автоматически, укажите папку с `Dead_weight.exe`.
-5. Установщик скопирует готовую команду запуска. В Steam откройте **Dead Weight -> Свойства -> Параметры запуска** и просто нажмите `Ctrl+V`.
+4. Установщик сам найдёт Dead Weight во всех Steam-библиотеках на любых дисках. Если не найдёт, выберите папку игры — ту, где находится `Dead_weight.exe`.
+5. Установщик скопирует команду запуска в буфер. В Steam откройте **Dead Weight → Свойства → Параметры запуска** и нажмите `Ctrl+V`.
 6. Нажимайте обычную кнопку **Играть** в Steam.
 
-Установщик также создаёт ярлык `Dead Weight - AUTO Battle` на рабочем столе.
+Установщик создаёт и запасной ярлык `Dead Weight — AUTO Battle` на рабочем столе.
+
+## Важное для старых установок
+
+Если мод был установлен до v0.1.18, один раз запустите Steam с уже настроенными параметрами запуска. Служебный JSON автоматически переведёт старую установку на новый формат. Если обновление не появилось, просто повторите установку из нового ZIP — сохранения и файлы игры не затрагиваются.
 
 ## Автообновление
 
-После первого запуска ничего скачивать вручную не нужно. Перед запуском игра проверяет официальный GitHub-релиз. Если есть новая версия, появится окно: обновить сразу или пропустить эту версию. При обновлении пакет проверяется SHA-256, заменяется только папка `DeadWeightAutoBattle\runtime`, затем игра запускается сама.
+После установки ничего скачивать вручную не нужно. Перед запуском лаунчер проверяет последний официальный GitHub-релиз. Новая версия скачивается из установочного ZIP, сверяется по SHA-256, затем заменяется только `DeadWeightAutoBattle\runtime` и игра запускается сама.
 
-Если сеть недоступна или пакет не прошёл проверку, старая версия остаётся и игра стартует нормально. Сохранения и файлы Dead Weight не затрагиваются.
+Если сеть недоступна или проверка не прошла, текущая установленная версия остаётся на месте и запускается как обычно.
 
-## Логика AUTO
+## Как работает AUTO
 
-- анализирует клетки будущих атак, ловушки, край карты, HP и энергию всей группы;
-- старается сначала безопасно добить цель, оттолкнуть её в пропасть или ударить по нескольким врагам;
-- не тратит энергию на возврат под удар, если уже стоит в безопасности;
-- учитывает доступные способности, часть талантов/экипировки и расходники;
-- не нажимает автоматически выход из боя или завершение забега.
+- анализирует клетки будущих атак, ловушки, края карты, здоровье и энергию всей группы;
+- ищет безопасные добивания, отталкивания в пропасть и атаки по нескольким целям;
+- не тратит энергию на возврат в опасную клетку, если уже стоит в безопасности;
+- учитывает доступные способности, часть талантов, экипировки и расходников;
+- никогда не нажимает автоматически выход из боя, главное меню или завершение забега.
 
-Мод тестовый: при сомнительном решении выключите AUTO верхней кнопкой и продолжите вручную.
+Это тестовый мод. Если решение выглядит сомнительным — выключите AUTO верхней кнопкой и продолжайте вручную.
 
-## Баг-репорт
+## Обратная связь
 
-Пришлите в Steam-чат автору полный скриншот боя с кнопкой AUTO, краткое описание ситуации и ожидаемого действия. Для проблем установки/обновления приложите `DeadWeightAutoBattle\AutoBattle.update.log`.
+Пришлите автору в Steam-чат:
+
+- полный скриншот боя с кнопкой AUTO и строками AUTO DEBUG;
+- краткое описание ожидаемого действия;
+- `DeadWeightAutoBattle\AutoBattle.update.log` для проблем запуска или обновления.
 
 [Шаблон отчёта](https://github.com/Trioracks/DeadWeight-AutoBattle/blob/main/docs/FEEDBACK_RU.md)
 
-## English
+## Поддержать автора
 
-**Mod: Dead Weight - AUTO Battle** adds an `AUTO` button only during combat. Bright means ON; grey means OFF. The choice is retained for the next battle.
-
-1. Download `DeadWeight_AutoBattle_v0.1.0.zip` from the [latest GitHub release](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest).
-2. Extract it anywhere and double-click `Install-DeadWeightAutoBattle.cmd`.
-3. If necessary, select the folder containing `Dead_weight.exe`.
-4. The installer copies the Steam launch command. Open **Dead Weight -> Properties -> Launch Options** and press `Ctrl+V`.
-5. Use Steam's normal **Play** button.
-
-Every launch checks the official GitHub release. A newer version is verified with SHA-256 and only the mod runtime is replaced; saves and original game files are untouched. If the network or verification fails, the currently installed version starts normally.
-
-For feedback, send a full combat screenshot with AUTO visible, concise reproduction steps and `DeadWeightAutoBattle\AutoBattle.update.log` for updater issues.
-
-## Поддержать автора / Support the author
-
-Если мод оказался полезен, поддержать разработку можно на [Boosty](https://boosty.to/gobelen).
+Если мод оказался полезен, поддержать дальнейшую разработку можно на [Boosty](https://boosty.to/gobelen).
