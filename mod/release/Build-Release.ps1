@@ -28,7 +28,12 @@ $runtimeRoot = Join-Path $runtimeStage 'runtime'
 $runtimeLaunchers = Join-Path $runtimeRoot 'launcher'
 New-Item -ItemType Directory -Force -Path $runtimeLaunchers | Out-Null
 Copy-Item -LiteralPath (Join-Path $launcherSource 'dead_weight_auto_launcher.gd') -Destination $runtimeLaunchers -Force
-Copy-Item -LiteralPath (Join-Path $launcherSource 'auto_battle_external_v3.gd') -Destination $runtimeLaunchers -Force
+$runtimeTacticsScript = Join-Path $runtimeLaunchers 'auto_battle_external_v3.gd'
+Copy-Item -LiteralPath (Join-Path $launcherSource 'auto_battle_external_v3.gd') -Destination $runtimeTacticsScript -Force
+$runtimeTacticsText = Get-Content -LiteralPath $runtimeTacticsScript -Raw
+$versionToken = '__AUTO_BATTLE_VERSION__'
+if (-not $runtimeTacticsText.Contains($versionToken)) { throw 'Runtime tactics script has no version token.' }
+[System.IO.File]::WriteAllText($runtimeTacticsScript, $runtimeTacticsText.Replace($versionToken, $Version), [System.Text.UTF8Encoding]::new($false))
 [ordered]@{
     schemaVersion = 1
     version = $Version

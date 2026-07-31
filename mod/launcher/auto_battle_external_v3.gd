@@ -13,6 +13,9 @@ const EMERGENCY_DAMAGE_RATIO := 0.45
 const LOW_HP_RATIO := 0.40
 const BATTLE_UI_ATTACH_RETRIES := 40
 const ICON_OFF_TINT := Color(0.58, 0.58, 0.58, 0.82)
+# Replaced by the release builder inside runtime/launcher. The source fallback
+# stays readable when the script is launched directly during development.
+const MOD_VERSION := "__AUTO_BATTLE_VERSION__"
 
 var _signals_bus = null
 var _turns = null
@@ -31,6 +34,7 @@ var _pending_action := ""
 var _overlay: CanvasLayer
 var _overlay_root: Control
 var _button = null
+var _version_label: Label
 var _debug_label: Label
 var _debug_lines: Array[String] = []
 var _bind_attempts := 0
@@ -73,6 +77,7 @@ func _hide_auto_outside_battle() -> void:
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
 		_set_auto_button_visible(false)
+	_refresh_version_label()
 
 
 func _set_auto_button_visible(is_visible: bool) -> void:
@@ -171,6 +176,7 @@ func _on_battle_end() -> void:
 		_button.set_pressed_no_signal(false)
 		_update_button_visual()
 		_set_auto_button_visible(false)
+	_refresh_version_label()
 	if is_instance_valid(_overlay_root):
 		_overlay_root.show()
 
@@ -193,6 +199,7 @@ func _ensure_overlay() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overlay.add_child(root)
 	_add_debug_label(root)
+	_add_version_label(root)
 
 	# The original text button uses the game's current UI theme, so its panel,
 	# border and pressed state match the rest of the combat interface.
@@ -218,6 +225,32 @@ func _ensure_overlay() -> void:
 	_log("button ready - AUTO " + ("ON" if _enabled else "OFF"))
 
 
+
+
+func _add_version_label(parent: Control) -> void:
+	_version_label = Label.new()
+	_version_label.name = "DeadWeightAutoVersion"
+	_version_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_version_label.offset_left = -142.0
+	_version_label.offset_top = 78.0
+	_version_label.offset_right = -82.0
+	_version_label.offset_bottom = 94.0
+	_version_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_version_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_version_label.add_theme_font_size_override("font_size", 10)
+	_version_label.add_theme_color_override("font_color", Color("d8c49a"))
+	_version_label.add_theme_color_override("font_outline_color", Color("1a0d08"))
+	_version_label.add_theme_constant_override("outline_size", 2)
+	_version_label.text = "v" + MOD_VERSION
+	parent.add_child(_version_label)
+	_refresh_version_label()
+
+
+func _refresh_version_label() -> void:
+	if not is_instance_valid(_version_label):
+		return
+	_version_label.text = "v" + MOD_VERSION
+	_version_label.visible = _battle_ui_visible and _enabled
 
 
 func _add_debug_label(parent: Control) -> void:
@@ -253,6 +286,7 @@ func _on_auto_toggled(is_enabled: bool) -> void:
 
 
 func _update_button_visual() -> void:
+	_refresh_version_label()
 	if not is_instance_valid(_button):
 		return
 	if _enabled:
@@ -2334,6 +2368,7 @@ func _stop_after_victory() -> void:
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
 		_set_auto_button_visible(false)
+	_refresh_version_label()
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
