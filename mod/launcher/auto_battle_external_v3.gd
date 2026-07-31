@@ -42,6 +42,9 @@ var _last_equipment_profile: Dictionary = {}
 var _last_meta_profile := ""
 var _last_rage_profile: Dictionary = {}
 var _rage_followup_controller_id := -1
+var _rage_followup_plan: Dictionary = {}
+var _last_stand_followup_controller_id := -1
+var _last_stand_followup_plan: Dictionary = {}
 var _last_party_profile := ""
 var _battle_round := 0
 var _round_hero_ids: Dictionary = {}
@@ -161,6 +164,9 @@ func _on_battle_end() -> void:
 	_last_rage_profile.clear()
 	_last_party_profile = ""
 	_rage_followup_controller_id = -1
+	_rage_followup_plan.clear()
+	_last_stand_followup_controller_id = -1
+	_last_stand_followup_plan.clear()
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
 		_update_button_visual()
@@ -325,7 +331,10 @@ func _decide_next_action() -> void:
 		var target: Vector2i = plan.target
 		_pending_action = str(plan.kind)
 		if plan.kind == "ultimate":
-			_rage_followup_controller_id = int(controller.get_instance_id())
+			# The follow-up is armed only after the self-buff actually resolves.
+			# A rejected/stale self-target must never consume the planned weapon hit.
+			_rage_followup_controller_id = -1
+			_rage_followup_plan = Dictionary(plan.get("rage_followup", {})).duplicate()
 		var action_label := "ATTACK"
 		if plan.kind == "support":
 			action_label = "SUPPORT"
@@ -341,6 +350,9 @@ func _decide_next_action() -> void:
 
 	if plan.kind == "move":
 		var move_target: Vector2i = plan.target
+		if plan.has("last_stand_followup"):
+			_last_stand_followup_controller_id = int(controller.get_instance_id())
+			_last_stand_followup_plan = Dictionary(plan.get("last_stand_followup", {})).duplicate()
 		_pending_action = "move"
 		_log("MOVE -> %s | %s" % [move_target, plan.reason])
 		controller.movement_done.connect(_on_auto_move_done.bind(controller, _battle_nonce), CONNECT_ONE_SHOT)
@@ -369,6 +381,9 @@ func _execute_player_attack(controller, ability, target: Vector2i, attempts: int
 			get_tree().create_timer(0.05).timeout.connect(_execute_player_attack.bind(controller, ability, target, attempts + 1, battle_nonce), CONNECT_ONE_SHOT)
 			return
 		_log("attack selection failed: %s" % ability.tag)
+		if _pending_action == "ultimate":
+			_rage_followup_controller_id = -1
+			_rage_followup_plan.clear()
 		_pending_action = ""
 		controller.clear_combo()
 		controller.use_ability(false, null)
@@ -376,6 +391,9 @@ func _execute_player_attack(controller, ability, target: Vector2i, attempts: int
 		return
 	if not ability.can_attack_check(controller.controlled_object.obj_position, target):
 		_log("rejected stale target: %s -> %s" % [ability.tag, target])
+		if _pending_action == "ultimate":
+			_rage_followup_controller_id = -1
+			_rage_followup_plan.clear()
 		_pending_action = ""
 		controller.clear_combo()
 		controller.use_ability(false, null)
@@ -394,7 +412,10 @@ func _wait_for_attack(controller, polls: int, battle_nonce: int) -> void:
 	if controller.in_attack_state or polls < 3:
 		get_tree().create_timer(0.16).timeout.connect(_wait_for_attack.bind(controller, polls + 1, battle_nonce), CONNECT_ONE_SHOT)
 		return
+	var completed_rage_setup := _pending_action == "ultimate"
 	_pending_action = ""
+	if completed_rage_setup and not _rage_followup_plan.is_empty():
+		_rage_followup_controller_id = int(controller.get_instance_id())
 	if not _has_living_enemies():
 		_stop_after_victory()
 		return
@@ -428,16 +449,23 @@ func _choose_plan(controller) -> Dictionary:
 	var hero = controller.controlled_object
 	var start: Vector2i = hero.obj_position
 	var incoming: int = _incoming_damage_at(start)
+	var stored_last_stand := _choose_last_stand_followup(controller, incoming)
+	if not stored_last_stand.is_empty():
+		return stored_last_stand
 	var self_threatened := _is_cell_threatened(start)
 	var threatened_party := _get_threatened_player_controllers()
 	var other_party_members_threatened := threatened_party.duplicate()
 	other_party_members_threatened.erase(controller)
 	var support := _choose_best_support(controller)
 	var attack := _choose_best_attack(controller, incoming)
+	# Rage is planned before ordinary movement: it may turn a one-damage melee
+	# strike into an immediate kill, and therefore opens a safe retreat.
+	var rage_ultimate := _choose_rage_ultimate(controller, incoming)
 	var safe_step := _choose_best_move(controller, incoming, true, true)
 	var safe_escape := _choose_best_move(controller, incoming, true, false, self_threatened)
 	var attack_then_escape := _choose_attack_then_safe_escape(controller, attack, incoming)
 	var recovery_trade := _choose_kill_recovery_trade(controller, incoming)
+	var last_stand_step := _choose_last_stand_step_attack(controller, incoming)
 
 	var consumable_offense := _choose_best_consumable_offense(controller, incoming)
 	var consumable_protection := _choose_best_consumable_protection(controller)
@@ -447,6 +475,9 @@ func _choose_plan(controller) -> Dictionary:
 	# Damage alone is insufficient: a zero-damage push can still throw a hero off
 	# the board, so we only remain when this action removes that exact threat.
 	if self_threatened:
+		if not rage_ultimate.is_empty() and (bool(rage_ultimate.get("self_safe_after", false)) or bool(rage_ultimate.get("rage_has_safe_escape", false))):
+			rage_ultimate["reason"] = "RAGE CLEAR THREAT - " + str(rage_ultimate.reason)
+			return rage_ultimate
 		if not attack.is_empty() and bool(attack.self_safe_after):
 			attack["reason"] = "CLEAR CURRENT THREAT - " + str(attack.reason)
 			return attack
@@ -491,9 +522,19 @@ func _choose_plan(controller) -> Dictionary:
 		if can_survive_trade and trade_makes_progress and int(attack.get("self_damage", 0)) <= 0:
 			attack["reason"] = "NO SAFE EXIT - SURVIVABLE DAMAGE TRADE - " + str(attack.reason)
 			return attack
+		# Death is otherwise inevitable. Prefer a one-step attack that actually
+		# damages or kills something over an empty skip; paths still reject traps,
+		# pits, obstacles and self-damage. A current-cell hit is the fallback when
+		# it produces more progress than stepping in.
+		var direct_last_stand_score := float(int(attack.get("enemy_damage", 0))) * 650.0 + float(int(attack.get("enemy_push_hits", 0))) * 9000.0 + float(attack.get("killed_enemy_controllers", []).size()) * ENEMY_KILL_SCORE
+		if not last_stand_step.is_empty() and float(last_stand_step.get("score", -INF)) >= direct_last_stand_score:
+			return last_stand_step
+		if trade_makes_progress and int(attack.get("self_damage", 0)) <= 0 and not _cell_has_forced_movement_threat(start):
+			attack["reason"] = "LAST STAND - no escape; trade unavoidable damage for progress - " + str(attack.reason)
+			return attack
 		return {
 			"kind": "hold",
-			"reason": "NO SAFE EXIT - lethal or non-progressing trade refused"
+			"reason": "NO SAFE EXIT - no legal last-stand hit"
 		}
 
 
@@ -524,6 +565,12 @@ func _choose_plan(controller) -> Dictionary:
 	if not rage_followup.is_empty():
 		return rage_followup
 
+	# A Rage setup that converts the selected weapon hit into a kill is stronger
+	# than a routine approach step. The next decision uses the exact stored hit,
+	# then spends all remaining AP on the already verified retreat if needed.
+	if not rage_ultimate.is_empty():
+		return rage_ultimate
+
 	# From a safe cell, take any one-AP move that produces real damage this turn.
 	# It is the fastest pattern: dodge, step in, hit, then inspect the next telegraph.
 	var move_follow_up: Dictionary = safe_step.get("follow_up", {}) if not safe_step.is_empty() else {}
@@ -534,9 +581,6 @@ func _choose_plan(controller) -> Dictionary:
 	# Immediate kills/falls stay ahead of buffs and positioning.
 	if not attack.is_empty() and (bool(attack.lethal) or bool(attack.fall)):
 		return attack
-	var rage_ultimate := _choose_rage_ultimate(controller, incoming)
-	if not rage_ultimate.is_empty():
-		return rage_ultimate
 	# Finite damage/push items are used from safety only when the game predicts a kill or fall.
 	if not consumable_offense.is_empty() and (attack.is_empty() or not _attack_makes_progress(attack)):
 		return consumable_offense
@@ -585,6 +629,83 @@ func _choose_attack_then_safe_escape(controller, attack: Dictionary, current_inc
 	attack["reason"] = "HIT THEN ESCAPE - reserve %d AP to %s; " % [remaining_ap, str(escape.target)] + str(attack.reason)
 	return attack
 
+
+# If the shown telegraph is lethal and every dodge/control/protection option has
+# failed, never waste the hero's final AP. This builds a movement plus an exact
+# follow-up attack, so after the one-cell approach the planner cannot simply hold.
+func _choose_last_stand_step_attack(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var params = controller.my_params
+	var ap := int(params.action_points)
+	if ap <= 0:
+		return {}
+	var spurt_data = params.get_detailed_spurt_data()
+	var ignores_traps := _hero_ignores_traps(params)
+	var best := {}
+	var best_score := -INF
+	for cell in _move_system.get_used_cells():
+		if cell == start or _move_system.has_character(cell) or _move_system.can_fall_from_cell(cell):
+			continue
+		if _move_system.is_obstancle_cell(cell) or (_move_system.has_trap(cell) and not ignores_traps):
+			continue
+		var trace = controller._trace_motion_path(start, cell, spurt_data)
+		if trace == null or not trace.has_valid_path():
+			continue
+		var path: Array = trace.get_front_motion_path()
+		var move_cost := int(trace.energy)
+		if path.is_empty() or move_cost >= ap:
+			continue
+		if not ignores_traps and _movement_trace_steps_on_trap(trace, start):
+			continue
+		var attack := _choose_best_attack_from_cell(controller, cell, _incoming_damage_at(cell), ap - move_cost)
+		if not _attack_makes_progress(attack) or int(attack.get("self_damage", 0)) > 0:
+			continue
+		var score := float(int(attack.get("enemy_damage", 0))) * 650.0
+		score += float(int(attack.get("enemy_push_hits", 0))) * 9000.0
+		score += float(int(attack.get("traps_destroyed", 0))) * 4000.0
+		score += float(attack.get("killed_enemy_controllers", []).size()) * ENEMY_KILL_SCORE
+		if bool(attack.get("fall", false)):
+			score += ENEMY_KILL_SCORE
+		if bool(attack.get("self_safe_after", false)):
+			score += 30000.0
+		score -= float(move_cost) * 30.0
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"kind": "move",
+			"target": cell,
+			"score": score,
+			"last_stand_followup": {
+				"ability": attack.ability,
+				"target": attack.target
+			},
+			"reason": "LAST STAND STEP+HIT - unavoidable %d incoming; move %s then %s -> %s" % [current_incoming, str(cell), str(attack.ability.tag), str(attack.target)]
+		}
+	return best
+
+
+func _choose_last_stand_followup(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or int(controller.get_instance_id()) != _last_stand_followup_controller_id:
+		return {}
+	var planned := _last_stand_followup_plan.duplicate()
+	_last_stand_followup_controller_id = -1
+	_last_stand_followup_plan.clear()
+	var hero = controller.controlled_object
+	if hero == null or not hero.is_alive() or planned.is_empty():
+		return {}
+	var ability = planned.get("ability", null)
+	var target: Vector2i = planned.get("target", hero.obj_position)
+	if ability == null or max(0, int(ability.get_final_ap_cost())) > int(controller.my_params.action_points):
+		return {}
+	if not ability.can_mechanically_attack(hero.obj_position, target, false, false, false) or not ability.check_terms(hero.obj_position, target):
+		return {}
+	var attack := _score_attack(controller, ability, hero.obj_position, target, current_incoming)
+	attack["reason"] = "LAST STAND FOLLOW-UP - execute stored attack instead of skipping; " + str(attack.reason)
+	return attack
 
 func _get_kill_recovery_hp(controller) -> int:
 	if controller == null or not is_instance_valid(controller) or controller.my_params == null:
@@ -700,11 +821,42 @@ func _is_rage_damage_ultimate(controller, ability) -> bool:
 
 
 func _get_rage_damage_bonus(ultimate, attack_ability) -> int:
-	var bonus := 0
+	var matched_bonus := 0
+	var generic_bonus := 0
 	for effect in ultimate.get_all_passive_effects():
-		if effect is change_damage_effect_class and effect.is_special_for_ability(attack_ability):
-			bonus += max(0, int(effect.get_fin_value()))
-	return bonus
+		if not effect is change_damage_effect_class:
+			continue
+		var amount := max(0, int(effect.get_fin_value()))
+		if amount <= 0:
+			continue
+		if effect.is_special_for_ability(attack_ability):
+			matched_bonus += amount
+		else:
+			# Some compiled effects report their weapon filter only after activation.
+			# It is still safe here: this planner calls it solely for a melee weapon
+			# follow-up and the actual game validates the target before executing it.
+			generic_bonus += amount
+	return matched_bonus if matched_bonus > 0 else generic_bonus
+
+
+func _get_rage_kill_controllers(controller, melee: Dictionary, damage_bonus: int) -> Array:
+	var killed: Array = []
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return killed
+	var ability = melee.get("ability", null)
+	if ability == null or damage_bonus <= 0:
+		return killed
+	var start: Vector2i = controller.controlled_object.obj_position
+	var target: Vector2i = melee.get("target", start)
+	var predicted_damage: Dictionary = ability.get_predicted_damage(start, target)
+	for cell in predicted_damage:
+		var target_object = _move_system.get_character(cell)
+		if target_object == null or not target_object.is_enemy_character() or target_object.my_params == null:
+			continue
+		var final_damage := max(0, int(predicted_damage[cell])) + damage_bonus
+		if final_damage >= int(target_object.my_params.hp) and target_object.my_controller != null and not killed.has(target_object.my_controller):
+			killed.append(target_object.my_controller)
+	return killed
 
 
 func _choose_best_melee_attack_from_cell(controller, start: Vector2i, current_incoming: int, available_ap: int) -> Dictionary:
@@ -741,7 +893,7 @@ func _choose_rage_ultimate(controller, current_incoming: int) -> Dictionary:
 	var best := {}
 	var best_score := -INF
 	for ultimate in _get_available_combat_abilities(controller):
-		if not _is_rage_damage_ultimate(controller, ultimate):
+		if not _is_rage_damage_ultimate(controller, ultimate) or bool(ultimate.cost_end_turn):
 			continue
 		var rage_cost := _get_rage_cost(controller.my_params, ultimate)
 		var ap_cost: int = max(0, int(ultimate.get_final_ap_cost()))
@@ -755,29 +907,66 @@ func _choose_rage_ultimate(controller, current_incoming: int) -> Dictionary:
 		var damage_bonus := _get_rage_damage_bonus(ultimate, melee.ability)
 		if damage_bonus <= 0:
 			continue
-		var score := float(melee.score) + float(damage_bonus) * 1200.0
-		if score > best_score:
-			best_score = score
-			best = {
-				"kind": "ultimate",
-				"ability": ultimate,
-				"target": start,
-				"score": score,
-				"reason": "RAGE %d/%d, spend %d; +%d damage before %s -> %s" % [int(rage.current), int(rage.maximum), rage_cost, damage_bonus, str(melee.ability.tag), str(melee.target)]
-			}
+		var rage_kills := _get_rage_kill_controllers(controller, melee, damage_bonus)
+		if rage_kills.is_empty():
+			continue
+		var safe_after_kill := not _is_cell_threatened(start, rage_kills)
+		var remaining_ap := int(controller.my_params.action_points) - ap_cost - max(0, int(melee.ability.get_final_ap_cost()))
+		var virtual_escape: Dictionary = {}
+		if not safe_after_kill and remaining_ap > 0:
+			virtual_escape = _choose_best_move(controller, current_incoming, true, false, true, remaining_ap, rage_kills)
+		# Under a current telegraph, do not consume Rage unless the resulting kill
+		# either removes it or leaves a concrete, trap-free exit after the weapon hit.
+		if _is_cell_threatened(start) and not safe_after_kill and virtual_escape.is_empty():
+			continue
+		var score := float(melee.score) + float(rage_kills.size()) * (ENEMY_KILL_SCORE + 22000.0) + float(damage_bonus) * 1800.0
+		if safe_after_kill:
+			score += 110000.0
+		elif not virtual_escape.is_empty():
+			score += 65000.0
+		if score <= best_score:
+			continue
+		best_score = score
+		var escape_text := ""
+		if not virtual_escape.is_empty():
+			escape_text = "; then escape to %s with %d AP" % [str(virtual_escape.target), int(virtual_escape.energy)]
+		best = {
+			"kind": "ultimate",
+			"ability": ultimate,
+			"target": start,
+			"score": score,
+			"self_safe_after": safe_after_kill,
+			"rage_has_safe_escape": not virtual_escape.is_empty(),
+			"rage_followup": {
+				"ability": melee.ability,
+				"target": melee.target,
+				"damage_bonus": damage_bonus,
+				"expected_kills": rage_kills.size()
+			},
+			"reason": "RAGE %d/%d, spend %d; +%d turns %s -> %s into guaranteed kill x%d%s" % [int(rage.current), int(rage.maximum), rage_cost, damage_bonus, str(melee.ability.tag), str(melee.target), rage_kills.size(), escape_text]
+		}
 	return best
+
 
 func _choose_rage_followup(controller, current_incoming: int) -> Dictionary:
 	if controller == null or not is_instance_valid(controller) or int(controller.get_instance_id()) != _rage_followup_controller_id:
 		return {}
+	var planned := _rage_followup_plan.duplicate()
 	_rage_followup_controller_id = -1
+	_rage_followup_plan.clear()
 	var hero = controller.controlled_object
-	if hero == null or not hero.is_alive():
+	if hero == null or not hero.is_alive() or planned.is_empty():
 		return {}
-	var melee := _choose_best_melee_attack_from_cell(controller, hero.obj_position, current_incoming, int(controller.my_params.action_points))
-	if not _attack_makes_progress(melee):
+	var ability = planned.get("ability", null)
+	var target: Vector2i = planned.get("target", hero.obj_position)
+	if ability == null or max(0, int(ability.get_final_ap_cost())) > int(controller.my_params.action_points):
 		return {}
-	melee["reason"] = "RAGE FOLLOW-UP - final buffed damage; " + str(melee.reason)
+	if not ability.can_mechanically_attack(hero.obj_position, target, false, false, false) or not ability.check_terms(hero.obj_position, target):
+		return {}
+	# Do not rescore this as an ordinary 1-damage hit: it is the exact melee
+	# target that the preceding Rage setup proved would die after its bonus.
+	var melee := _score_attack(controller, ability, hero.obj_position, target, current_incoming)
+	melee["reason"] = "RAGE FOLLOW-UP - execute stored +%d kill target %s; %s" % [int(planned.get("damage_bonus", 0)), str(target), str(melee.reason)]
 	return melee
 
 
@@ -1468,7 +1657,7 @@ func _is_ahead_on_push_line(from: Vector2i, to: Vector2i, direction: Vector2i) -
 		return false
 	return true
 
-func _choose_best_move(controller, current_incoming: int, require_safe: bool = false, one_ap_only: bool = false, flee: bool = false, ap_budget: int = -1) -> Dictionary:
+func _choose_best_move(controller, current_incoming: int, require_safe: bool = false, one_ap_only: bool = false, flee: bool = false, ap_budget: int = -1, excluded_threat_controllers: Array = []) -> Dictionary:
 	var hero = controller.controlled_object
 	var start: Vector2i = hero.obj_position
 	var params = controller.my_params
@@ -1479,7 +1668,7 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 	var combat_stance := _get_combat_stance(controller)
 	var best := {}
 	var best_score := -INF
-	var current_threatened := _is_cell_threatened(start)
+	var current_threatened := _is_cell_threatened(start, excluded_threat_controllers)
 
 	if ap <= 0:
 		return best
@@ -1505,8 +1694,8 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 		if one_ap_only and energy > 1:
 			continue
 
-		var incoming := _incoming_damage_at(cell)
-		var threatened := _is_cell_threatened(cell)
+		var incoming := _incoming_damage_at(cell, excluded_threat_controllers)
+		var threatened := _is_cell_threatened(cell, excluded_threat_controllers)
 		if require_safe and threatened:
 			continue
 
@@ -1993,6 +2182,9 @@ func _stop_after_victory() -> void:
 	_pending_action = ""
 	_approach_memory.clear()
 	_rage_followup_controller_id = -1
+	_rage_followup_plan.clear()
+	_last_stand_followup_controller_id = -1
+	_last_stand_followup_plan.clear()
 	_battle_nonce += 1
 	_log("victory detected - no end turn")
 
@@ -2055,6 +2247,10 @@ func _finish_active_turn() -> void:
 	var controller = _active_controller
 	if controller != null and is_instance_valid(controller) and int(controller.get_instance_id()) == _rage_followup_controller_id:
 		_rage_followup_controller_id = -1
+		_rage_followup_plan.clear()
+	if controller != null and is_instance_valid(controller) and int(controller.get_instance_id()) == _last_stand_followup_controller_id:
+		_last_stand_followup_controller_id = -1
+		_last_stand_followup_plan.clear()
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
