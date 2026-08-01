@@ -686,6 +686,13 @@ func _choose_plan(controller) -> Dictionary:
 		# or positioning; the threatened companion still receives its own turn
 		# before enemies act.
 
+	# Здоровяк I starts with only two HP. His thrust reaches two cells, so at
+	# one HP he must not trade that range advantage for a routine adjacent hit:
+	# leave to a verified safe lane unless the current action ends the fight.
+	var bully_preservation_move := _choose_bully_preservation_move(controller, incoming)
+	if not bully_preservation_move.is_empty() and (attack.is_empty() or not bool(attack.lethal) and not bool(attack.fall)):
+		return bully_preservation_move
+
 	var rage_followup := _choose_rage_followup(controller, incoming)
 	if not rage_followup.is_empty():
 		return rage_followup
@@ -1852,6 +1859,12 @@ func _choose_best_attack_from_cell(controller, start: Vector2i, current_incoming
 			if not ability.check_terms(start, target):
 				continue
 			var result := _score_attack(controller, ability, start, target, current_incoming)
+			# The Bully's charge changes his own tile, while the game only exposes
+			# its push result. Do not guess that an unscored charge is safe: reserve
+			# it for a mechanically verified fall. His two-cell thrust is the normal
+			# safe damage tool and remains available every other turn.
+			if _is_bully_companion(controller) and _is_bully_dash_push(ability) and not bool(result.get("fall", false)):
+				continue
 			# A remaining enemy is the encounter objective. If it can be killed now,
 			# never let an otherwise valuable trap attack consume this turn. The
 			# movement planners use this same selector, so they also avoid moving for
@@ -2374,6 +2387,27 @@ func _nearest_distance_to_cells(cell: Vector2i, cells: Array) -> float:
 	return nearest if nearest < INF else 0.0
 
 
+func _choose_bully_preservation_move(controller, current_incoming: int) -> Dictionary:
+	if not _is_bully_companion(controller) or controller.controlled_object == null:
+		return {}
+	var hp := int(controller.my_params.hp)
+	var max_hp := max(1, int(controller.my_params.get_max_hp()))
+	# Tier I has 2 HP, Tier II 3 and Tier III 4. "Half or below" is the
+	# hard retreat point: the next ordinary hit could otherwise delete the
+	# companion before his thrust can be useful again.
+	if hp * 2 > max_hp:
+		return {}
+	var start: Vector2i = controller.controlled_object.obj_position
+	var nearest_enemy := _nearest_enemy_distance(start)
+	if nearest_enemy > 2.25:
+		return {}
+	var retreat := _choose_best_move(controller, current_incoming, true, false, true)
+	if retreat.is_empty():
+		return {}
+	retreat["reason"] = "BULLY PRESERVE - HP %d/%d, enemy %.1f away; " % [hp, max_hp, nearest_enemy] + str(retreat.reason)
+	return retreat
+
+
 func _choose_boss_caution_move(controller) -> Dictionary:
 	if controller == null or controller.controlled_object == null:
 		return {}
@@ -2548,6 +2582,12 @@ func _is_equipped_weapon_ability(params, ability) -> bool:
 
 
 func _get_combat_stance(controller) -> Dictionary:
+	# Mercenary Bully / "Здоровяк": his lunge is a real 1-2 tile attack, but
+	# his starting health is only two. Treat him as a skirmisher, not a generic
+	# pusher, so safe movement keeps a two-cell attack lane instead of hugging
+	# the target before every turn.
+	if _is_bully_companion(controller):
+		return {"mode": "SKIRMISHER", "preferred_distance": 2}
 	var ranged_strength := 0
 	var melee_strength := 0
 	var push_strength := 0
@@ -2633,11 +2673,12 @@ func _score_move_cell(controller, cell: Vector2i, path_size: int, incoming: int,
 
 	var nearest_enemy := _nearest_enemy_distance(cell)
 	if incoming == 0:
-		if str(combat_stance.get("mode", "MELEE")) == "RANGED":
+		var stance_mode := str(combat_stance.get("mode", "MELEE"))
+		if stance_mode == "RANGED" or stance_mode == "SKIRMISHER":
 			var preferred_distance: int = int(combat_stance.get("preferred_distance", 2))
-			score += 360.0 - absf(nearest_enemy - float(preferred_distance)) * 110.0
+			score += 460.0 - absf(nearest_enemy - float(preferred_distance)) * 130.0
 			if nearest_enemy <= 1.25:
-				score -= 900.0
+				score -= 1400.0 if stance_mode == "SKIRMISHER" else 900.0
 		else:
 			score += maxf(0.0, 140.0 - nearest_enemy * 18.0)
 	else:
@@ -2948,6 +2989,26 @@ func _ability_is_push(ability) -> bool:
 			return true
 	# Kept only for legacy content whose compiled mechanic cannot be inspected.
 	return str(ability.tag).to_lower().contains("push")
+
+
+func _is_bully_dash_push(ability) -> bool:
+	return ability != null and str(ability.tag).to_lower().begins_with("abil_push_run")
+
+
+func _is_bully_companion(controller) -> bool:
+	if controller == null or not is_instance_valid(controller) or _is_main_hero_controller(controller):
+		return false
+	var has_charge := false
+	var has_reach_thrust := false
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null:
+			continue
+		var tag := str(ability.tag).to_lower()
+		if tag.begins_with("abil_push_run"):
+			has_charge = true
+		elif tag.begins_with("abil_hit_2t_"):
+			has_reach_thrust = true
+	return has_charge and has_reach_thrust
 
 
 func _direction_from_to(from: Vector2i, to: Vector2i) -> Vector2i:

@@ -4,7 +4,7 @@ Use this checklist for every public version of Mod: Dead Weight - AUTO Battle.
 
 1. Update the release version in the command passed to `mod\release\Build-Release.ps1`.
 2. Compile `auto_battle_external_v3.gd` with the matching GDE bytecode version and run a short headless script-load probe with the installed `Dead_weight.exe`. A static compile alone is not a release gate.
-3. Manually verify the battle UI and tactics on these cases: no companion (only `AUTO`); one or more companions (both buttons); switch `AUTO` <-> `AUTO COMPANIONS` during a turn; companion death; and an enemy that is attackable while a trap is also attackable (the enemy action must win).
+3. Manually verify the battle UI and tactics on these cases: no companion (only `AUTO`); one or more companions (both buttons); switch `AUTO` <-> `AUTO COMPANIONS` during a turn; companion death; and an enemy that is attackable while a trap is also attackable (the enemy action must win). Also verify the 1-HP Bully against an enemy at one or two cells: it must retreat through a safe route unless it has a lethal hit or a verified fall.
 4. Build in `D:\Codex\Builds\Mod-Dead-Weight` and inspect the user installer ZIP plus `deadweight-autobattle-update.json` compatibility bridge.
 5. Verify the user installer includes only the mod installer, bootstrap and `runtime\version.json` plus the two launcher scripts. Never ship game EXEs, PCK files, saves, extracted game data or logs.
 6. Commit and push the changed source, documentation and release notes to `main`.

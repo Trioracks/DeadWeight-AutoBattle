@@ -38,6 +38,7 @@ AUTO uses available game controllers, so the game itself applies energy costs, c
 - may keep energy and end on a safe cell instead of returning into an attack;
 - reads abilities, talents, some equipment and available consumables;
 - resolves every active skill granted by equipped weapons and items, including damage-over-time effects; ready attack skills are preferred, while a critical hero retreats if a boss has an untelegraphed attack;
+- treats the Bully companion as a fragile skirmisher: uses the two-cell thrust lane, retreats to a verified safe route at half HP or lower, and reserves the charge-push for a verified enemy fall;
 - deliberately never triggers the game's escape/run-ending controls automatically.
 
 This is an active test build. If a decision looks wrong, turn AUTO off with the top-right button and continue manually.

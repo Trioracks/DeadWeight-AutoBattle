@@ -37,6 +37,7 @@ If the network is unavailable or verification fails, the installed version stays
 - does not spend energy to step back into danger when already safe;
 - considers available abilities, some talents, equipment and consumables;
 - resolves every active skill granted by equipped weapons and items, including damage-over-time effects; ready attack skills are preferred, while a critical hero retreats if a boss has an untelegraphed attack;
+- Bully keeps a thrust lane, retreats through a verified safe route at half HP or lower, and uses the charge-push only for a verified enemy fall;
 - never automatically presses escape, main menu or any run-ending control.
 
 This is a test mod. If a decision looks questionable, turn AUTO off with the top-right button and continue manually.
