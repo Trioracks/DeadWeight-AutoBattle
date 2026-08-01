@@ -507,6 +507,7 @@ func _choose_plan(controller) -> Dictionary:
 
 	var consumable_offense := _choose_best_consumable_offense(controller, incoming)
 	var consumable_protection := _choose_best_consumable_protection(controller)
+	var escape_energy_ability := _choose_escape_energy_ability(controller)
 	var escape_energy := _choose_escape_energy_consumable(controller)
 
 	# The same displayed zones that the game paints red are a hard constraint.
@@ -549,6 +550,8 @@ func _choose_plan(controller) -> Dictionary:
 		if not consumable_offense.is_empty() and bool(consumable_offense.get("self_safe_after", false)):
 			consumable_offense["reason"] = "NO SAFE EXIT - CLEAR THREAT WITH ITEM - " + str(consumable_offense.reason)
 			return consumable_offense
+		if not escape_energy_ability.is_empty():
+			return escape_energy_ability
 		if not escape_energy.is_empty():
 			return escape_energy
 		if not support.is_empty() and (bool(support.saves_lethal) or bool(support.prevents_health_damage)):
@@ -1121,17 +1124,26 @@ func _print_rage_profile(controller) -> void:
 
 
 func _get_support_values(ability) -> Dictionary:
-	var values := {"heal": 0, "defence": 0}
+	var values := {"heal": 0, "defence": 0, "block": 0, "evasion": false, "energy": 0}
 	if ability == null:
 		return values
 	for effect in ability.get_all_passive_effects():
+		if effect == null:
+			continue
+		var signature := _effect_signature(effect)
+		var amount := _effect_amount(effect)
 		if effect is full_heal_effect_class:
 			values["heal"] = 999
-		elif effect is heal_effect_class:
-			values["heal"] = int(values["heal"]) + max(0, int(effect.value))
-		elif effect is change_defence_effect_class:
-			var defence_value: int = int(effect.get_fin_value()) if effect.has_method("get_fin_value") else int(effect.value)
-			values["defence"] = int(values["defence"]) + max(0, defence_value)
+		elif effect is heal_effect_class or signature.contains("heal"):
+			values["heal"] = int(values["heal"]) + amount
+		elif effect is change_defence_effect_class or signature.contains("defence") or signature.contains("defense") or signature.contains("armor") or signature.contains("armour"):
+			values["defence"] = int(values["defence"]) + amount
+		elif effect is block_damage_oneshot_effect_class or signature.contains("block_damage") or signature.contains("ignore_incoming"):
+			values["block"] = int(values["block"]) + max(1, amount)
+		elif signature.contains("dodge") or signature.contains("evad"):
+			values["evasion"] = true
+		elif signature.contains("action_point") or signature.contains("actionpoint") or signature.contains("spurt"):
+			values["energy"] = int(values["energy"]) + amount
 	return values
 
 
@@ -1143,23 +1155,28 @@ func _score_support(controller, ability, target_controller, target: Vector2i, va
 		return {}
 	var heal_amount := min(max(0, int(values.get("heal", 0))), max(0, int(target_params.get_max_hp()) - int(target_params.hp)))
 	var defence_amount := max(0, int(values.get("defence", 0)))
-	if heal_amount <= 0 and defence_amount <= 0:
+	var block_amount := max(0, int(values.get("block", 0)))
+	var evasion := bool(values.get("evasion", false))
+	if heal_amount <= 0 and defence_amount <= 0 and block_amount <= 0 and not evasion:
 		return {}
 	var shield_estimate := maxi(0, incoming - defence_amount)
 	var hp_after_support := min(int(target_params.get_max_hp()), int(target_params.hp) + heal_amount)
-	# A shield cannot be trusted to turn a lethal hit into a safe one: armor-piercing
-	# and late modifiers may invalidate that estimate. Only real healing may rescue lethal damage.
-	var saves_lethal: bool = heal_amount > 0 and incoming >= int(target_params.hp) and hp_after_support > incoming
-	var prevents_health_damage: bool = defence_amount > 0 and incoming < int(target_params.hp) and shield_estimate == 0
+	# Ordinary armour is only trusted against a non-lethal hit. A one-shot block
+	# or explicit evasion is a deterministic protection effect, so an equipment
+	# skill with one of those effects may also save a lethal telegraph.
+	var saves_lethal: bool = incoming >= int(target_params.hp) and (hp_after_support > incoming or block_amount >= incoming or evasion)
+	var prevents_health_damage: bool = incoming < int(target_params.hp) and (shield_estimate == 0 or block_amount >= incoming or evasion)
 	var cost: int = max(0, int(ability.get_final_ap_cost()))
-	var score := float(heal_amount + defence_amount) * 80.0 - float(cost) * 24.0
+	var score := float(heal_amount + defence_amount + block_amount) * 80.0 - float(cost) * 24.0
+	if evasion:
+		score += 140.0
 	if saves_lethal:
 		score += 1000000.0
 	elif prevents_health_damage:
 		score += 14000.0
 	else:
 		score += float(incoming) * 500.0
-	var protection_text := "heal %d, shield %d, incoming %d, HP after %d" % [heal_amount, defence_amount, incoming, hp_after_support]
+	var protection_text := "heal %d, shield %d, block %d, evade %s, incoming %d, HP after %d" % [heal_amount, defence_amount, block_amount, str(evasion), incoming, hp_after_support]
 	return {
 		"kind": "support",
 		"ability": ability,
@@ -1442,6 +1459,34 @@ func _choose_escape_energy_consumable(controller) -> Dictionary:
 			}
 	return {}
 
+
+# Some accessories and armour grant an active ability rather than changing a
+# base stat. Treat a deterministic AP-restoring equipment skill like an item
+# only when it proves a safe destination exists; otherwise it remains unused.
+func _choose_escape_energy_ability(controller) -> Dictionary:
+	if controller == null or controller.controlled_object == null or int(controller.my_params.action_points) > 0:
+		return {}
+	var start: Vector2i = controller.controlled_object.obj_position
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or _is_consumable_ability(controller, ability):
+			continue
+		var values := _get_support_values(ability)
+		var restored_ap := int(values.get("energy", 0))
+		if restored_ap <= 0 or int(ability.get_final_ap_cost()) > int(controller.my_params.action_points):
+			continue
+		if not _can_use_consumable_on(controller, ability, start):
+			continue
+		if _has_safe_escape_with_bonus_ap(controller, restored_ap):
+			return {
+				"kind": "support",
+				"ability": ability,
+				"target": start,
+				"score": 900000.0,
+				"reason": "EQUIPMENT SKILL %s - restores %d AP for a proven safe escape" % [str(ability.tag), restored_ap]
+			}
+	return {}
+
+
 func _choose_best_support(controller) -> Dictionary:
 	if _turns == null or controller == null or not is_instance_valid(controller):
 		return {}
@@ -1456,7 +1501,7 @@ func _choose_best_support(controller) -> Dictionary:
 		if ability == null or _is_consumable_ability(controller, ability):
 			continue
 		var values := _get_support_values(ability)
-		if int(values.get("heal", 0)) <= 0 and int(values.get("defence", 0)) <= 0:
+		if int(values.get("heal", 0)) <= 0 and int(values.get("defence", 0)) <= 0 and int(values.get("block", 0)) <= 0 and not bool(values.get("evasion", false)):
 			continue
 		if int(ability.get_final_ap_cost()) > available_ap:
 			continue
@@ -1548,6 +1593,12 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var predicted_damage: Dictionary = ability.get_predicted_damage(start, target)
 	var selected_cells: Array[Vector2i] = ability.get_selecting_cells(start, target)
 	var score := float(ability.priority) * 10.0
+	var equipped_weapon_attack := _is_equipped_weapon_ability(controller.my_params, ability)
+	# A weapon slot is an intentional build choice. Its actual damage, AP cost
+	# and legality are still evaluated below; this only resolves otherwise-close
+	# choices in favour of the equipped weapon skill.
+	if equipped_weapon_attack:
+		score += 90.0
 	var incoming_after := current_incoming
 	var lethal := false
 	var fall := false
@@ -1671,6 +1722,8 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		reason = "MULTI-HIT x%d - " % enemy_hit_count + reason
 	if hits_party_priority:
 		reason = "PARTY FOCUS - " + reason
+	if equipped_weapon_attack:
+		reason = "EQUIPPED WEAPON - " + reason
 
 	return {
 		"kind": "attack",
@@ -2050,25 +2103,34 @@ func _get_weapon_ability_tags(params) -> Array[String]:
 	return tags
 
 
+func _is_equipped_weapon_ability(params, ability) -> bool:
+	return ability != null and _get_weapon_ability_tags(params).has(str(ability.tag))
+
+
 func _get_combat_stance(controller) -> Dictionary:
 	var ranged_strength := 0
 	var melee_strength := 0
 	var push_strength := 0
 	var preferred_distance := 2
+	var equipped_reach_weapon := false
 	var weapon_abilities := _get_weapon_ability_tags(controller.my_params)
 	for ability in _get_available_combat_abilities(controller):
 		if ability == null or not ability.get_is_ability_an_attack():
 			continue
 		var weapon_weight := 4 if weapon_abilities.has(str(ability.tag)) else 1
-		if ability.ability_type == character_ability.ABILITY_TYPE.RANGE or ability.ability_type == character_ability.ABILITY_TYPE.CAST or ability.ability_type == character_ability.ABILITY_TYPE.THROW:
-			if int(ability.get_max_distance()) >= 2:
+		var has_reach := int(ability.get_max_distance()) >= 2
+		var is_ranged_type := ability.ability_type == character_ability.ABILITY_TYPE.RANGE or ability.ability_type == character_ability.ABILITY_TYPE.CAST or ability.ability_type == character_ability.ABILITY_TYPE.THROW
+		if is_ranged_type or weapon_weight > 1 and has_reach:
+			if has_reach:
 				ranged_strength += weapon_weight
 				preferred_distance = maxi(preferred_distance, mini(4, maxi(2, int(ability.get_max_distance()) - 1)))
+				if weapon_weight > 1:
+					equipped_reach_weapon = true
 		elif ability.ability_type == character_ability.ABILITY_TYPE.MELEE:
 			melee_strength += weapon_weight
 		if _ability_is_push(ability):
 			push_strength += weapon_weight
-	if ranged_strength > melee_strength:
+	if equipped_reach_weapon or ranged_strength > melee_strength:
 		return {"mode": "RANGED", "preferred_distance": preferred_distance}
 	if push_strength > 0 and push_strength >= melee_strength:
 		return {"mode": "PUSH", "preferred_distance": 1}
@@ -2105,6 +2167,7 @@ func _print_equipment_profile(controller) -> void:
 		return
 	_last_equipment_profile[controller_key] = signature
 	_log("equipment: " + (", ".join(equipment) if not equipment.is_empty() else "none"))
+	_log("equipment final stats: HP %d/%d, EN %d/%d, Step %d" % [int(params.hp), int(params.get_max_hp()), int(params.action_points), int(params.action_points_max), int(params.get_final_speed(true))])
 	_log("combat profile: %s, safe distance %d; final attacks: %s" % [str(stance.get("mode", "MELEE")), int(stance.get("preferred_distance", 1)), ", ".join(attack_stats)])
 
 

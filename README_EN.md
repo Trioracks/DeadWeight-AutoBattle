@@ -35,6 +35,7 @@ AUTO uses available game controllers, so the game itself applies energy costs, c
 - prefers safe kills, pushes into a fall, and multi-target attacks;
 - may keep energy and end on a safe cell instead of returning into an attack;
 - reads abilities, talents, some equipment and available consumables;
+- uses active skills granted by weapons and equipment; block, evasion and energy recovery are used only for a proven rescue;
 - deliberately never triggers the game's escape/run-ending controls automatically.
 
 This is an active test build. If a decision looks wrong, turn AUTO off with the top-right button and continue manually.

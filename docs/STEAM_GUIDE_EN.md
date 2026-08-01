@@ -35,6 +35,7 @@ If the network is unavailable or verification fails, the installed version stays
 - looks for safe kills, pushes into a fall and attacks hitting multiple enemies;
 - does not spend energy to step back into danger when already safe;
 - considers available abilities, some talents, equipment and consumables;
+- uses active skills granted by weapons and equipment; block, evasion and energy recovery are used only for a proven rescue;
 - never automatically presses escape, main menu or any run-ending control.
 
 This is a test mod. If a decision looks questionable, turn AUTO off with the top-right button and continue manually.
