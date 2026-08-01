@@ -14,6 +14,8 @@ const LOW_HP_RATIO := 0.40
 const UNTELEGRAPHED_BOSS_DAMAGE := 3
 const BATTLE_UI_ATTACH_RETRIES := 40
 const ICON_OFF_TINT := Color(0.58, 0.58, 0.58, 0.82)
+const CONTROL_EFFECT_TOKENS := ["stun", "web", "immobil", "immob", "sleep", "freeze", "silence", "root", "entang", "bind", "remove_swing", "mind_control"]
+const ACTIVE_EFFECT_COLLECTION_NAMES := ["active_effects", "current_effects", "status_effects", "applied_effects", "passive_effects", "effects", "effects_list"]
 # Replaced by the release builder inside runtime/launcher. The source fallback
 # stays readable when the script is launched directly during development.
 const MOD_VERSION := "__AUTO_BATTLE_VERSION__"
@@ -562,6 +564,14 @@ func _choose_plan(controller) -> Dictionary:
 	var hero = controller.controlled_object
 	var start: Vector2i = hero.obj_position
 	var incoming: int = _incoming_damage_at(start)
+	# A movement lock is worse than ordinary damage: it can turn the following
+	# turn into a guaranteed death. Clear an actual control effect immediately
+	# whenever a ready item, equipment skill or ally skill can legally do so.
+	var cleanse := _choose_best_cleanse(controller)
+	if not cleanse.is_empty():
+		var cleansed_tags: Array[String] = cleanse.get("control_tags", [])
+		cleanse["reason"] = "CLEANSE CONTROL [%s] - " % ", ".join(cleansed_tags) + str(cleanse.reason)
+		return cleanse
 	var stored_last_stand := _choose_last_stand_followup(controller, incoming)
 	if not stored_last_stand.is_empty():
 		return stored_last_stand
@@ -844,6 +854,8 @@ func _choose_last_stand_step_attack(controller, current_incoming: int) -> Dictio
 		if path.is_empty() or move_cost >= ap:
 			continue
 		if not ignores_traps and _movement_trace_steps_on_trap(trace, start):
+			continue
+		if _is_cell_control_threatened(cell):
 			continue
 		var attack := _choose_best_attack_from_cell(controller, cell, _incoming_damage_at(cell), ap - move_cost)
 		if not _attack_makes_progress(attack) or int(attack.get("self_damage", 0)) > 0:
@@ -1249,6 +1261,175 @@ func _get_support_values(ability) -> Dictionary:
 		elif signature.contains("action_point") or signature.contains("actionpoint") or signature.contains("spurt"):
 			values["energy"] = int(values["energy"]) + amount
 	return values
+
+
+func _mechanic_signature(mechanic) -> String:
+	if mechanic == null:
+		return ""
+	var signature := str(mechanic.get_class())
+	var script = mechanic.get_script()
+	if script != null and not str(script.resource_path).is_empty():
+		signature += " " + str(script.resource_path).get_file().get_basename()
+	return signature.to_lower()
+
+
+func _control_tag_from_signature(signature: String) -> String:
+	var normalized := signature.to_lower()
+	for token in CONTROL_EFFECT_TOKENS:
+		if normalized.contains(token):
+			return token
+	return ""
+
+
+func _append_unique_control_tag(tags: Array[String], tag: String) -> void:
+	if not tag.is_empty() and not tags.has(tag):
+		tags.append(tag)
+
+
+func _ability_control_tags(ability) -> Array[String]:
+	var tags: Array[String] = []
+	if ability == null:
+		return tags
+	_append_unique_control_tag(tags, _control_tag_from_signature(str(ability.tag)))
+	for mechanic in ability.get_full_mechanics_array():
+		if mechanic == null:
+			continue
+		_append_unique_control_tag(tags, _control_tag_from_signature(_mechanic_signature(mechanic)))
+		var effects = mechanic.get("all_effects")
+		if effects == null:
+			continue
+		for effect in effects:
+			_append_unique_control_tag(tags, _control_tag_from_signature(_effect_signature(effect)))
+	return tags
+
+
+func _get_cleanse_values(ability) -> Dictionary:
+	var values := {"known": false, "cleanses_all": false, "removes_web": false, "effects": []}
+	if ability == null:
+		return values
+	for mechanic in ability.get_full_mechanics_array():
+		if mechanic != null and _mechanic_signature(mechanic).contains("cleanse"):
+			values["known"] = true
+			values["cleanses_all"] = true
+			values["effects"].append("cleanse")
+	for effect in ability.get_all_passive_effects():
+		if effect == null:
+			continue
+		var signature := _effect_signature(effect)
+		if signature.contains("cleanse") or signature.contains("dispel") or signature.contains("purge"):
+			values["known"] = true
+			values["cleanses_all"] = true
+			values["effects"].append("cleanse")
+		elif signature.contains("remove_web"):
+			values["known"] = true
+			values["removes_web"] = true
+			values["effects"].append("remove web")
+	return values
+
+
+func _get_object_property_if_present(object, property_name: String):
+	if object == null or not is_instance_valid(object):
+		return null
+	for property_data in object.get_property_list():
+		if str(property_data.get("name", "")) == property_name:
+			return object.get(property_name)
+	return null
+
+
+func _append_active_effect_values(value, effects: Array, depth: int = 0) -> void:
+	if value == null or depth > 2:
+		return
+	if value is Array:
+		for entry in value:
+			_append_active_effect_values(entry, effects, depth + 1)
+	elif value is Dictionary:
+		for key in value:
+			_append_active_effect_values(value[key], effects, depth + 1)
+	elif value is Object and not effects.has(value):
+		effects.append(value)
+
+
+func _get_active_control_tags(controller) -> Array[String]:
+	var tags: Array[String] = []
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return tags
+	var effects: Array = []
+	for owner in [controller.controlled_object, controller.my_params]:
+		for property_name in ACTIVE_EFFECT_COLLECTION_NAMES:
+			_append_active_effect_values(_get_object_property_if_present(owner, property_name), effects)
+	for effect in effects:
+		var signature := _effect_signature(effect)
+		var tag := _control_tag_from_signature(signature + " " + str(effect.get("tag")))
+		_append_unique_control_tag(tags, tag)
+	return tags
+
+
+func _get_controlled_party_members() -> Array:
+	var controlled: Array = []
+	if _turns == null:
+		return controlled
+	for player_controller in _turns.player_controllers:
+		if player_controller == null or player_controller.controlled_object == null or not player_controller.controlled_object.is_alive():
+			continue
+		var tags := _get_active_control_tags(player_controller)
+		if not tags.is_empty():
+			controlled.append({"controller": player_controller, "tags": tags})
+	return controlled
+
+
+func _cleanse_can_remove_controls(values: Dictionary, control_tags: Array[String]) -> bool:
+	if control_tags.is_empty():
+		return false
+	if bool(values.get("cleanses_all", false)):
+		return true
+	return bool(values.get("removes_web", false)) and control_tags.has("web")
+
+
+func _choose_best_cleanse(controller) -> Dictionary:
+	if _turns == null or controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var controlled_members := _get_controlled_party_members()
+	if controlled_members.is_empty():
+		return {}
+	var start: Vector2i = controller.controlled_object.obj_position
+	var available_ap := int(controller.my_params.action_points)
+	var best := {}
+	var best_score := -INF
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null:
+			continue
+		var values := _get_cleanse_values(ability)
+		if not bool(values.get("known", false)) or int(ability.get_final_ap_cost()) > available_ap:
+			continue
+		for entry in controlled_members:
+			var target_controller = entry.controller
+			var control_tags: Array[String] = entry.tags
+			if not _cleanse_can_remove_controls(values, control_tags):
+				continue
+			var target: Vector2i = target_controller.controlled_object.obj_position
+			if not _can_use_consumable_on(controller, ability, target):
+				continue
+			var score := 400000.0 + float(control_tags.size()) * 50000.0
+			if target_controller == controller:
+				score += 600000.0
+			elif _is_main_hero_controller(target_controller):
+				score += 300000.0
+			if _is_consumable_ability(controller, ability):
+				score -= 800.0
+			score -= float(max(0, int(ability.get_final_ap_cost()))) * 20.0
+			if score <= best_score:
+				continue
+			best_score = score
+			best = {
+				"kind": "consumable" if _is_consumable_ability(controller, ability) else "support",
+				"ability": ability,
+				"target": target,
+				"target_controller": target_controller,
+				"control_tags": control_tags,
+				"score": score,
+				"reason": "%s on hero %d with %s" % ["ITEM " + str(ability.tag) if _is_consumable_ability(controller, ability) else "ABILITY " + str(ability.tag), int(target_controller.get_instance_id()), ", ".join(control_tags)]
+			}
+	return best
 
 
 func _get_offensive_effect_values(ability) -> Dictionary:
@@ -2310,6 +2491,11 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 
 		var incoming := _incoming_damage_at(cell, excluded_threat_controllers)
 		var threatened := _is_cell_threatened(cell, excluded_threat_controllers)
+		# Control zones are an unconditional exclusion. Damage can sometimes be
+		# healed or blocked, but walking into web/stun/immobilise can remove the
+		# entire next turn and is never an acceptable fallback destination.
+		if _is_cell_control_threatened(cell, excluded_threat_controllers):
+			continue
 		if require_safe and threatened:
 			continue
 
@@ -2726,6 +2912,26 @@ func _is_cell_threatened(cell: Vector2i, excluded_controllers: Array = []) -> bo
 		if prepared_action != null and _prepared_action_marks_cell(prepared_action, cell):
 			return true
 	return false
+
+
+func _control_threats_at(cell: Vector2i, excluded_controllers: Array = []) -> Array[String]:
+	var tags: Array[String] = []
+	if _turns == null:
+		return tags
+	for enemy_controller in _turns.enemy_controllers:
+		if excluded_controllers.has(enemy_controller):
+			continue
+		var prepared_action = enemy_controller.get_prepared_ability_action()
+		if prepared_action == null or not _prepared_action_marks_cell(prepared_action, cell):
+			continue
+		var ability = prepared_action.prepared_ability
+		for tag in _ability_control_tags(ability):
+			_append_unique_control_tag(tags, tag)
+	return tags
+
+
+func _is_cell_control_threatened(cell: Vector2i, excluded_controllers: Array = []) -> bool:
+	return not _control_threats_at(cell, excluded_controllers).is_empty()
 
 
 
@@ -3295,11 +3501,13 @@ func _log_state(controller) -> void:
 	var pos: Vector2i = hero.obj_position
 	var incoming := _incoming_damage_at(pos)
 	var self_threatened := _is_cell_threatened(pos)
+	var active_control := _get_active_control_tags(controller)
+	var incoming_control := _control_threats_at(pos)
 	var threatened_party := _get_threatened_player_controllers()
 	var skill_text := ""
 	for ability in _get_available_combat_abilities(controller):
 		skill_text += "%s[%d] " % [ability.tag, int(ability.get_final_ap_cost())]
-	_log("HP %d/%d | EN %d/%d | danger %s | incoming %d | party red %d" % [params.hp, params.get_max_hp(), params.action_points, params.action_points_max, "RED" if self_threatened else "CLEAR", incoming, threatened_party.size()])
+	_log("HP %d/%d | EN %d/%d | danger %s | incoming %d | control %s/%s | party red %d" % [params.hp, params.get_max_hp(), params.action_points, params.action_points_max, "RED" if self_threatened else "CLEAR", incoming, ",".join(active_control) if not active_control.is_empty() else "clear", ",".join(incoming_control) if not incoming_control.is_empty() else "clear", threatened_party.size()])
 	_print_talent_profile(controller)
 	_print_party_profile()
 	_print_rage_profile(controller)

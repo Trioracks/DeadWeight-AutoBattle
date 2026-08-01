@@ -32,6 +32,7 @@ AUTO uses available game controllers, so the game itself applies energy costs, c
 - shows `AUTO` only in combat and `ONLY COMPANIONS` only when a living companion is present; the modes are mutually exclusive;
 - evaluates next-turn danger cells, traps, map edges, health and energy for the whole party;
 - treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
+- treats control (`web`, stun, immobilise, sleep, etc.) as a hard movement exclusion; if control is already active, it prioritises a legal cleanse from the hero, companion, or consumable;
 - prefers safe kills, pushes into a fall, and multi-target attacks;
 - when an enemy can be affected, does not spend the action on a trap or neutral object; board actions are only a fallback when no enemy can be affected now;
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;

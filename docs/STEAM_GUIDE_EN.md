@@ -32,6 +32,7 @@ If the network is unavailable or verification fails, the installed version stays
 
 - `AUTO` evaluates future attack cells, traps, map edges, health and energy for the whole party; `ONLY COMPANIONS` applies the same tactics to companions only;
 - treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
+- never moves into control (`web`, stun, immobilise, sleep, etc.); if control is already active, it first searches for a legal cleanse from the hero, companion, or consumable;
 - looks for safe kills, pushes into a fall and attacks hitting multiple enemies;
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;
 - does not spend energy to step back into danger when already safe;
