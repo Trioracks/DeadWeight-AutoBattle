@@ -43,6 +43,8 @@ var _approach_memory: Dictionary = {}
 var _last_consumable_catalog: Dictionary = {}
 var _last_talent_profile: Dictionary = {}
 var _last_equipment_profile: Dictionary = {}
+var _equipment_ability_cache: Dictionary = {}
+var _equipment_skill_uses_this_turn: Dictionary = {}
 var _last_meta_profile := ""
 var _last_rage_profile: Dictionary = {}
 var _rage_followup_controller_id := -1
@@ -165,6 +167,8 @@ func _on_battle_end() -> void:
 	_last_consumable_catalog.clear()
 	_last_talent_profile.clear()
 	_last_equipment_profile.clear()
+	_equipment_ability_cache.clear()
+	_equipment_skill_uses_this_turn.clear()
 	_last_meta_profile = ""
 	_last_rage_profile.clear()
 	_last_party_profile = ""
@@ -332,6 +336,7 @@ func _start_active_player_turn() -> void:
 	_active_controller = controller
 	_decisions_this_turn = 0
 	_pending_action = ""
+	_equipment_skill_uses_this_turn.erase(str(controller.get_instance_id()))
 	_log_state(controller)
 	_decide_next_action.call_deferred()
 
@@ -370,12 +375,16 @@ func _decide_next_action() -> void:
 			_rage_followup_controller_id = -1
 			_rage_followup_plan = Dictionary(plan.get("rage_followup", {})).duplicate()
 		var action_label := "ATTACK"
-		if plan.kind == "support":
+		if bool(plan.get("equipment_skill", false)):
+			action_label = "EQUIPMENT"
+		elif plan.kind == "support":
 			action_label = "SUPPORT"
 		elif plan.kind == "ultimate":
 			action_label = "ULTIMATE"
 		elif plan.kind == "consumable":
 			action_label = "ITEM"
+		if bool(plan.get("equipment_setup", false)):
+			_mark_equipment_skill_used_this_turn(controller, ability)
 		_log("%s %s -> %s | %s" % [action_label, ability.tag, target, plan.reason])
 		controller.set_movement_mode(false)
 		controller.activate_ability_from_panel(ability)
@@ -492,6 +501,7 @@ func _choose_plan(controller) -> Dictionary:
 	other_party_members_threatened.erase(controller)
 	var support := _choose_best_support(controller)
 	var attack := _choose_best_attack(controller, incoming)
+	var equipment_setup := _choose_equipment_setup_skill(controller, attack)
 	# Rage is planned before ordinary movement: it may turn a one-damage melee
 	# strike into an immediate kill, and therefore opens a safe retreat.
 	var rage_ultimate := _choose_rage_ultimate(controller, incoming)
@@ -628,6 +638,12 @@ func _choose_plan(controller) -> Dictionary:
 	# Immediate kills/falls stay ahead of buffs and positioning.
 	if not attack.is_empty() and (bool(attack.lethal) or bool(attack.fall)):
 		return attack
+	# A durable item skill is not a consumable. When its self-buff/debuff setup
+	# is ready and leaves a verified follow-up attack, spend it before ordinary
+	# routine damage. This includes effects that the game exposes only through
+	# the item's skill tag rather than through a known support-effect class.
+	if not equipment_setup.is_empty():
+		return equipment_setup
 	# Finite damage/push items are used from safety only when the game predicts a kill or fall.
 	if not consumable_offense.is_empty() and (attack.is_empty() or not _attack_makes_progress(attack)):
 		return consumable_offense
@@ -1526,16 +1542,168 @@ func _support_target_can_escape(target_controller) -> bool:
 	var target: Vector2i = target_controller.controlled_object.obj_position
 	return not _choose_best_move(target_controller, _incoming_damage_at(target), true, false).is_empty()
 
-func _get_available_combat_abilities(controller) -> Array:
-	var final_abilities: Array = []
+
+# Equipment skills live on item modifiers (skill_new_tag), not necessarily in
+# the hero's base ability array. Resolve the actual equipped skills first and
+# use a private, owner-bound copy only when the game has not already supplied
+# that ability to the controller. This keeps active weapons, armour and relic
+# skills visible to every tactical selector while preserving their game-side
+# cooldown/resource checks.
+func _get_equipped_skill_entries(controller) -> Array:
+	var entries: Array = []
+	if controller == null or not is_instance_valid(controller) or controller.my_params == null:
+		return entries
+	var seen_tags: Dictionary = {}
+	for item in controller.my_params.items:
+		if item == null:
+			continue
+		for modifier in item.effects_arr:
+			if modifier == null:
+				continue
+			var skill_tag := str(modifier.skill_new_tag)
+			if skill_tag.is_empty() or seen_tags.has(skill_tag):
+				continue
+			seen_tags[skill_tag] = true
+			var ability = _get_equipment_skill_ability(controller, skill_tag)
+			if ability == null:
+				continue
+			entries.append({
+				"item": item,
+				"item_tag": str(item.tag),
+				"ability": ability
+			})
+	return entries
+
+
+func _get_equipment_skill_ability(controller, skill_tag: String):
+	if controller == null or controller.controlled_object == null or skill_tag.is_empty():
+		return null
+	for ability in _get_base_combat_abilities(controller):
+		if ability != null and str(ability.tag) == skill_tag:
+			return ability
+	var cache_key := str(controller.get_instance_id()) + ":" + skill_tag
+	var cached = _equipment_ability_cache.get(cache_key, null)
+	if cached != null and is_instance_valid(cached):
+		return cached
+	var template = Database.get_ability_by_tag(skill_tag)
+	if template == null:
+		return null
+	var resolved = template.duplicate(true)
+	if resolved == null:
+		return null
+	resolved.set_owner(controller.controlled_object)
+	_equipment_ability_cache[cache_key] = resolved
+	return resolved
+
+
+func _get_base_combat_abilities(controller) -> Array:
+	var abilities: Array = []
 	if controller == null or not is_instance_valid(controller):
-		return final_abilities
+		return abilities
 	var hero = controller.controlled_object
 	if hero != null and is_instance_valid(hero):
 		for ability in hero.abilities:
-			if ability != null and not final_abilities.has(ability):
-				final_abilities.append(ability)
+			if ability != null and not abilities.has(ability):
+				abilities.append(ability)
 	for ability in controller.my_params.get_character_abilities():
+		if ability != null and not abilities.has(ability):
+			abilities.append(ability)
+	return abilities
+
+
+func _get_equipped_skill_tags(params) -> Array[String]:
+	var tags: Array[String] = []
+	if params == null:
+		return tags
+	for item in params.items:
+		if item == null:
+			continue
+		for modifier in item.effects_arr:
+			if modifier != null and not str(modifier.skill_new_tag).is_empty() and not tags.has(str(modifier.skill_new_tag)):
+				tags.append(str(modifier.skill_new_tag))
+	return tags
+
+
+func _is_equipped_item_ability(params, ability) -> bool:
+	return ability != null and _get_equipped_skill_tags(params).has(str(ability.tag))
+
+
+func _equipment_skill_was_used_this_turn(controller, ability) -> bool:
+	if controller == null or ability == null:
+		return false
+	var used_tags: Dictionary = _equipment_skill_uses_this_turn.get(str(controller.get_instance_id()), {})
+	return used_tags.has(str(ability.tag))
+
+
+func _mark_equipment_skill_used_this_turn(controller, ability) -> void:
+	if controller == null or ability == null:
+		return
+	var controller_key := str(controller.get_instance_id())
+	var used_tags: Dictionary = _equipment_skill_uses_this_turn.get(controller_key, {})
+	used_tags[str(ability.tag)] = true
+	_equipment_skill_uses_this_turn[controller_key] = used_tags
+
+
+# Unknown equipment effects are still real active skills. When such a skill is
+# ready, it is used once as a setup only if it leaves AP for a concrete legal
+# attack. Recognised healing/defence/AP skills keep their dedicated, safer
+# planners above; attacks and pushes are scored by the regular attack planner.
+func _choose_equipment_setup_skill(controller, _primary_attack: Dictionary) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var available_ap := int(controller.my_params.action_points)
+	if available_ap <= 1:
+		return {}
+	var best := {}
+	var best_score := -INF
+	for entry in _get_equipped_skill_entries(controller):
+		var ability = entry.ability
+		if ability == null or _equipment_skill_was_used_this_turn(controller, ability):
+			continue
+		if ability.get_is_ability_an_attack() or _ability_is_push(ability) or _is_rage_damage_ultimate(controller, ability):
+			continue
+		var values := _get_support_values(ability)
+		if int(values.get("heal", 0)) > 0 or int(values.get("defence", 0)) > 0 or int(values.get("block", 0)) > 0 or bool(values.get("evasion", false)) or int(values.get("energy", 0)) > 0:
+			continue
+		var cost := max(0, int(ability.get_final_ap_cost()))
+		if bool(ability.cost_end_turn) or cost >= available_ap:
+			continue
+		var targets: Array[Vector2i] = [start]
+		for enemy_cell in _enemy_cells():
+			_candidate_append(targets, enemy_cell)
+		for player_controller in _turns.player_controllers:
+			if player_controller != null and player_controller.controlled_object != null and player_controller.controlled_object.is_alive():
+				_candidate_append(targets, player_controller.controlled_object.obj_position)
+		for target: Vector2i in targets:
+			if not _can_use_consumable_on(controller, ability, target):
+				continue
+			var follow_up := _choose_best_attack_from_cell(controller, start, _incoming_damage_at(start), available_ap - cost)
+			if not _attack_makes_progress(follow_up):
+				continue
+			var score := float(ability.priority) * 20.0 + minf(6000.0, maxf(0.0, float(follow_up.score)) * 0.10) - float(cost) * 30.0
+			if target == start:
+				score += 40.0
+			if score <= best_score:
+				continue
+			best_score = score
+			best = {
+				"kind": "support",
+				"ability": ability,
+				"target": target,
+				"score": score,
+				"equipment_skill": true,
+				"equipment_setup": true,
+				"reason": "EQUIPMENT SKILL %s from %s - ready setup before %s -> %s" % [str(ability.tag), str(entry.item_tag), str(follow_up.ability.tag), str(follow_up.target)]
+			}
+	return best
+
+
+func _get_available_combat_abilities(controller) -> Array:
+	var final_abilities := _get_base_combat_abilities(controller)
+	for entry in _get_equipped_skill_entries(controller):
+		var ability = entry.ability
 		if ability != null and not final_abilities.has(ability):
 			final_abilities.append(ability)
 	return final_abilities
@@ -1612,10 +1780,13 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var predicted_damage: Dictionary = ability.get_predicted_damage(start, target)
 	var selected_cells: Array[Vector2i] = ability.get_selecting_cells(start, target)
 	var score := float(ability.priority) * 10.0
+	var equipped_item_skill := _is_equipped_item_ability(controller.my_params, ability)
 	var equipped_weapon_attack := _is_equipped_weapon_ability(controller.my_params, ability)
-	# A weapon slot is an intentional build choice. Its actual damage, AP cost
-	# and legality are still evaluated below; this only resolves otherwise-close
-	# choices in favour of the equipped weapon skill.
+	# A durable item skill is an intentional build choice. Its actual damage, AP
+	# cost, target terms and cooldown are still validated below; this bonus only
+	# resolves comparable legal actions in favour of a ready equipped skill.
+	if equipped_item_skill:
+		score += 320.0
 	if equipped_weapon_attack:
 		score += 90.0
 	var incoming_after := current_incoming
@@ -1741,6 +1912,8 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		reason = "MULTI-HIT x%d - " % enemy_hit_count + reason
 	if hits_party_priority:
 		reason = "PARTY FOCUS - " + reason
+	if equipped_item_skill:
+		reason = "EQUIPPED ITEM SKILL - " + reason
 	if equipped_weapon_attack:
 		reason = "EQUIPPED WEAPON - " + reason
 
@@ -2562,6 +2735,11 @@ func _finish_active_turn() -> void:
 
 func _is_consumable_ability(controller, ability) -> bool:
 	if ability == null:
+		return false
+	# A durable piece of equipment can expose its panel skill through the same
+	# item-ability flag as a consumable. skill_new_tag is the authoritative
+	# equipment marker, so never demote such a skill to the finite-item branch.
+	if controller != null and is_instance_valid(controller) and _is_equipped_item_ability(controller.my_params, ability):
 		return false
 	if bool(ability.is_use_item_abil):
 		return true

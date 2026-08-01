@@ -36,7 +36,7 @@ If the network is unavailable or verification fails, the installed version stays
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;
 - does not spend energy to step back into danger when already safe;
 - considers available abilities, some talents, equipment and consumables;
-- uses active skills granted by weapons and equipment; block, evasion and energy recovery are used only for a proven rescue;
+- resolves every active skill granted by equipped weapons and items; ready attack skills are preferred, while defensive and setup skills are used only when they preserve a safe follow-up;
 - never automatically presses escape, main menu or any run-ending control.
 
 This is a test mod. If a decision looks questionable, turn AUTO off with the top-right button and continue manually.
