@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
-    [string]$OutputRoot = 'D:\Codex\Builds\Mod-Dead-Weight'
+    [string]$OutputRoot = 'D:\Codex\Builds\Mod-Dead-Weight',
+    [string]$GameExe = 'H:\Steam\steamapps\common\Dead Weight\Dead_weight.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,6 +67,12 @@ foreach ($relative in $required) {
 foreach ($name in @('Dead_weight.exe', 'Dead_weight.console.exe', 'GameAnalytics.dll', 'GameAssembly.dll')) {
     if (Get-ChildItem -LiteralPath $releaseRoot -Recurse -File -Filter $name) { throw "Release must not include game file $name." }
 }
+
+# Do not create a distributable package unless the actual game runtime loads
+# the source and the staged release, constructs both UI controls and confirms
+# their signal wiring. This catches the class of regression where the mod
+# silently fails to parse and no AUTO button appears in combat.
+& (Join-Path $PSScriptRoot 'Test-UiRegression.ps1') -Version $Version -ReleaseRoot $releaseRoot -GameExe $GameExe
 
 $installerHash = (Get-FileHash -LiteralPath $installerZip -Algorithm SHA256).Hash
 
