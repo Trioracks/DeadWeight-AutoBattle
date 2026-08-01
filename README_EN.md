@@ -2,7 +2,7 @@
 
 [Русский](README.md) | [English](README_EN.md)
 
-A Windows test build of AUTO Battle for the Steam version of **Dead Weight**. The mod adds an `AUTO` button during combat only: a bright button means ON, a grey button means OFF. The AUTO preference is remembered for the next encounter.
+A Windows test build of AUTO Battle for the Steam version of **Dead Weight**. The mod adds `AUTO` and `AUTO COMPANIONS` buttons during combat: the first controls the whole party, while the second controls companions only and leaves the main hero manual. The modes are mutually exclusive and remembered for the next encounter.
 
 ## Player installation
 
@@ -29,10 +29,11 @@ If GitHub is unavailable, a hash does not match, or an update is interrupted, th
 
 AUTO uses available game controllers, so the game itself applies energy costs, cooldowns, animations and effects. The current test logic:
 
-- shows the button only in combat;
+- shows `AUTO` only in combat and `AUTO COMPANIONS` only when a living companion is present; the modes are mutually exclusive;
 - evaluates next-turn danger cells, traps, map edges, health and energy for the whole party;
 - treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
 - prefers safe kills, pushes into a fall, and multi-target attacks;
+- when an enemy can be affected, does not spend the action on a trap or neutral object; board actions are only a fallback when no enemy can be affected now;
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;
 - may keep energy and end on a safe cell instead of returning into an attack;
 - reads abilities, talents, some equipment and available consumables;
@@ -45,8 +46,8 @@ This is an active test build. If a decision looks wrong, turn AUTO off with the 
 
 Please send the author via Steam chat:
 
-1. a full combat screenshot with the AUTO button visible;
-2. `DeadWeightAutoBattle\AutoBattle.update.log` for installation/update issues;
+1. a full combat screenshot with the AUTO button and version visible;
+2. `DeadWeightAutoBattle\AutoBattle.update.log` for installation/update issues, or the final `[AUTO]` lines from `Godot\app_userdata\Dead_weight\logs\godot.log` for a tactical decision;
 3. concise reproduction steps and the expected result.
 
 A detailed template is in [docs/FEEDBACK_EN.md](docs/FEEDBACK_EN.md).

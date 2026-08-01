@@ -10,4 +10,4 @@
 - Что ожидалось:
 - Повторяется ли: всегда / иногда / один раз
 
-Приложите полный скриншот и, при проблеме запуска или обновления, файл `DeadWeightAutoBattle\AutoBattle.update.log`.
+Приложите полный скриншот и: при проблеме запуска или обновления — `DeadWeightAutoBattle\AutoBattle.update.log`; при проблеме с решением в бою — последние строки с `[AUTO]` из `Godot\app_userdata\Dead_weight\logs\godot.log`.

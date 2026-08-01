@@ -1,6 +1,6 @@
 # AUTO Battle — Dead Weight mod | EN
 
-**Mod: Dead Weight — AUTO Battle** adds an `AUTO` button in the top-right corner during combat only. A bright button means AUTO is on; grey means off. The setting is remembered for the next battle.
+**Mod: Dead Weight — AUTO Battle** adds `AUTO` and `AUTO COMPANIONS` buttons in the top-right corner during combat only. `AUTO` controls the whole party; `AUTO COMPANIONS` appears when a living companion is present and controls companions only, leaving the main hero manual. The modes are mutually exclusive and remembered for the next battle.
 
 [Download latest version](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest) | [Source code](https://github.com/Trioracks/DeadWeight-AutoBattle)
 
@@ -20,7 +20,7 @@ The installer also creates a fallback desktop shortcut named `Dead Weight — AU
 
 ## Existing older installations
 
-If the mod was installed before v0.1.25 or the `AUTO` button does not appear, close Steam completely and run the current ZIP installer once: it restores the permanent Steam launch option. Saves and game files are never touched.
+If the mod was installed before v0.2.00 or the `AUTO` button does not appear, close Steam completely and run the current ZIP installer once: it restores the permanent Steam launch option. Saves and game files are never touched.
 
 ## Automatic updates
 
@@ -30,7 +30,7 @@ If the network is unavailable or verification fails, the installed version stays
 
 ## AUTO behaviour
 
-- evaluates future attack cells, traps, map edges, health and energy for the whole party;
+- `AUTO` evaluates future attack cells, traps, map edges, health and energy for the whole party; `AUTO COMPANIONS` applies the same tactics to companions only;
 - treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
 - looks for safe kills, pushes into a fall and attacks hitting multiple enemies;
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;
@@ -45,9 +45,9 @@ This is a test mod. If a decision looks questionable, turn AUTO off with the top
 
 Send the author via Steam chat:
 
-- a full battle screenshot with AUTO and AUTO DEBUG visible;
+- a full battle screenshot with AUTO and the mod version visible;
 - a short description of the expected action;
-- `DeadWeightAutoBattle\AutoBattle.update.log` for startup or updater issues.
+- `DeadWeightAutoBattle\AutoBattle.update.log` for startup or updater issues, or the last `[AUTO]` lines from `Godot\app_userdata\Dead_weight\logs\godot.log` for a tactical decision.
 
 [Feedback template](https://github.com/Trioracks/DeadWeight-AutoBattle/blob/main/docs/FEEDBACK_EN.md)
 

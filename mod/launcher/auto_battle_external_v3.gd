@@ -23,7 +23,9 @@ var _turns = null
 var _move_system = null
 var _battle_system = null
 var _enabled := false
+var _companions_only := false
 var _auto_preference := false
+var _companions_preference := false
 var _battle_closing := false
 var _battle_ui_visible := false
 var _battle_waiting_for_first_player_turn := false
@@ -35,9 +37,8 @@ var _pending_action := ""
 var _overlay: CanvasLayer
 var _overlay_root: Control
 var _button = null
+var _companions_button = null
 var _version_label: Label
-var _debug_label: Label
-var _debug_lines: Array[String] = []
 var _bind_attempts := 0
 var _disabled_icon_material: ShaderMaterial
 var _approach_memory: Dictionary = {}
@@ -55,6 +56,8 @@ var _last_stand_followup_plan: Dictionary = {}
 var _last_party_profile := ""
 var _battle_round := 0
 var _round_hero_ids: Dictionary = {}
+var _battle_log_stats: Dictionary = {}
+var _battle_summary_logged := false
 
 
 func _ready() -> void:
@@ -72,22 +75,26 @@ func _process(_delta: float) -> void:
 func _hide_auto_outside_battle() -> void:
 	_battle_ui_visible = false
 	_enabled = false
-	_debug_lines.clear()
-	_refresh_debug_label()
+	_companions_only = false
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
-		_set_auto_button_visible(false)
+	if is_instance_valid(_companions_button):
+		_companions_button.set_pressed_no_signal(false)
+	_set_auto_button_visible(false)
 	_refresh_version_label()
 
 
 func _set_auto_button_visible(is_visible: bool) -> void:
-	if not is_instance_valid(_button):
-		return
-	_button.visible = is_visible
-	_button.mouse_filter = Control.MOUSE_FILTER_STOP if is_visible else Control.MOUSE_FILTER_IGNORE
+	if is_instance_valid(_button):
+		_button.visible = is_visible
+		_button.mouse_filter = Control.MOUSE_FILTER_STOP if is_visible else Control.MOUSE_FILTER_IGNORE
+	if is_instance_valid(_companions_button):
+		var companions_visible := is_visible and _has_living_companions()
+		_companions_button.visible = companions_visible
+		_companions_button.mouse_filter = Control.MOUSE_FILTER_STOP if companions_visible else Control.MOUSE_FILTER_IGNORE
 
 
 func _bind_game() -> void:
@@ -122,9 +129,9 @@ func _on_battle_ready() -> void:
 	_battle_waiting_for_first_player_turn = true
 	_battle_round = 0
 	_round_hero_ids.clear()
-	_debug_lines.clear()
+	_reset_battle_log_stats()
 	_enabled = false
-	_refresh_debug_label()
+	_companions_only = false
 	_battle_nonce += 1
 	_log("battle ready - waiting for first player turn")
 
@@ -141,26 +148,32 @@ func _wait_for_stable_battle_ui(battle_nonce: int, attempts: int) -> void:
 
 	_battle_ui_visible = true
 	_enabled = _auto_preference
+	_companions_only = _companions_preference and _has_living_companions()
+	if _companions_only:
+		_enabled = true
+	_set_battle_log_mode()
 	_ensure_overlay()
 	if is_instance_valid(_overlay_root):
 		_overlay_root.show()
 	if is_instance_valid(_button):
-		_button.set_pressed_no_signal(_enabled)
-		_set_auto_button_visible(true)
-		_update_button_visual()
-	_log("battle stable - AUTO attached")
+		_button.set_pressed_no_signal(_enabled and not _companions_only)
+	if is_instance_valid(_companions_button):
+		_companions_button.set_pressed_no_signal(_enabled and _companions_only)
+	_set_auto_button_visible(true)
+	_update_button_visual()
+	_log("BATTLE START | mode=%s | companions=%d" % [_battle_log_stats.get("mode", "OFF"), _living_companion_count()])
 	if _enabled:
 		_start_active_player_turn.call_deferred()
 
 
 func _on_battle_end() -> void:
+	_write_battle_summary("battle end")
 	_battle_closing = true
 	_battle_ui_visible = false
 	_battle_waiting_for_first_player_turn = false
 	_battle_nonce += 1
 	_enabled = false
-	_debug_lines.clear()
-	_refresh_debug_label()
+	_companions_only = false
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
@@ -179,8 +192,10 @@ func _on_battle_end() -> void:
 	_last_stand_followup_plan.clear()
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
-		_update_button_visual()
-		_set_auto_button_visible(false)
+	if is_instance_valid(_companions_button):
+		_companions_button.set_pressed_no_signal(false)
+	_update_button_visual()
+	_set_auto_button_visible(false)
 	_refresh_version_label()
 	if is_instance_valid(_overlay_root):
 		_overlay_root.show()
@@ -189,7 +204,7 @@ func _on_battle_end() -> void:
 	_battle_round = 0
 	_round_hero_ids.clear()
 func _ensure_overlay() -> void:
-	if is_instance_valid(_button):
+	if is_instance_valid(_button) and is_instance_valid(_companions_button):
 		return
 
 	_overlay = CanvasLayer.new()
@@ -203,10 +218,9 @@ func _ensure_overlay() -> void:
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overlay.add_child(root)
-	_add_debug_label(root)
 	_add_version_label(root)
 
-	# The original text button uses the game's current UI theme, so its panel,
+	# The original text buttons use the game's current UI theme, so their panel,
 	# border and pressed state match the rest of the combat interface.
 	_button = Button.new()
 	_button.text = "AUTO"
@@ -224,10 +238,27 @@ func _ensure_overlay() -> void:
 	_button.offset_bottom = 77.0
 	_button.toggled.connect(_on_auto_toggled)
 	root.add_child(_button)
-	_button.set_pressed_no_signal(_enabled)
+
+	_companions_button = Button.new()
+	_companions_button.text = "AUTO COMPANIONS"
+	_companions_button.name = "auto_companions_button"
+	_companions_button.toggle_mode = true
+	_companions_button.tooltip_text = "AUTO COMPANIONS - main hero stays manual"
+	_companions_button.mouse_filter = Control.MOUSE_FILTER_STOP
+	_companions_button.custom_minimum_size = Vector2(138.0, 42.0)
+	_companions_button.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_companions_button.offset_left = -286.0
+	_companions_button.offset_top = 35.0
+	_companions_button.offset_right = -144.0
+	_companions_button.offset_bottom = 77.0
+	_companions_button.toggled.connect(_on_companions_toggled)
+	root.add_child(_companions_button)
+
+	_button.set_pressed_no_signal(_enabled and not _companions_only)
+	_companions_button.set_pressed_no_signal(_enabled and _companions_only)
 	_set_auto_button_visible(_battle_ui_visible)
 	_update_button_visual()
-	_log("button ready - AUTO " + ("ON" if _enabled else "OFF"))
+	_log("buttons ready - AUTO " + ("ON" if _enabled and not _companions_only else "OFF") + ", COMPANIONS " + ("ON" if _enabled and _companions_only else "OFF"))
 
 
 
@@ -236,13 +267,13 @@ func _add_version_label(parent: Control) -> void:
 	_version_label = Label.new()
 	_version_label.name = "DeadWeightAutoVersion"
 	_version_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_version_label.offset_left = -142.0
-	_version_label.offset_top = 78.0
-	_version_label.offset_right = -82.0
-	_version_label.offset_bottom = 94.0
-	_version_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_version_label.offset_left = -78.0
+	_version_label.offset_top = 82.0
+	_version_label.offset_right = -8.0
+	_version_label.offset_bottom = 98.0
+	_version_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_version_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_version_label.add_theme_font_size_override("font_size", 10)
+	_version_label.add_theme_font_size_override("font_size", 11)
 	_version_label.add_theme_color_override("font_color", Color("d8c49a"))
 	_version_label.add_theme_color_override("font_outline_color", Color("1a0d08"))
 	_version_label.add_theme_constant_override("outline_size", 2)
@@ -258,48 +289,64 @@ func _refresh_version_label() -> void:
 	_version_label.visible = _battle_ui_visible and _enabled
 
 
-func _add_debug_label(parent: Control) -> void:
-	_debug_label = Label.new()
-	_debug_label.name = "DeadWeightAutoDebug"
-	_debug_label.position = Vector2(152.0, 14.0)
-	_debug_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_debug_label.add_theme_font_size_override("font_size", 16)
-	_debug_label.add_theme_color_override("font_color", Color("f7e6bd"))
-	_debug_label.add_theme_color_override("font_outline_color", Color("1a0d08"))
-	_debug_label.add_theme_constant_override("outline_size", 3)
-	parent.add_child(_debug_label)
-	_refresh_debug_label()
-
-
 func _on_auto_toggled(is_enabled: bool) -> void:
-	_enabled = is_enabled
 	if not _battle_ui_visible:
 		_enabled = false
-		_debug_lines.clear()
-		_refresh_debug_label()
+		_companions_only = false
 		if is_instance_valid(_button):
 			_button.set_pressed_no_signal(false)
 		return
 
-	_auto_preference = _enabled
-	_debug_lines.clear()
+	_enabled = is_enabled
+	_companions_only = false
+	_auto_preference = is_enabled
+	_companions_preference = false
+	if is_instance_valid(_companions_button):
+		_companions_button.set_pressed_no_signal(false)
 	_update_button_visual()
-	_refresh_debug_label()
+	_set_battle_log_mode()
 	_log("AUTO %s" % ("ON" if _enabled else "OFF"))
+	if _enabled:
+		_start_active_player_turn.call_deferred()
+
+
+func _on_companions_toggled(is_enabled: bool) -> void:
+	if not _battle_ui_visible or not _has_living_companions():
+		_companions_only = false
+		_companions_preference = false
+		if is_instance_valid(_companions_button):
+			_companions_button.set_pressed_no_signal(false)
+		_update_button_visual()
+		return
+
+	_enabled = is_enabled
+	_companions_only = is_enabled
+	_companions_preference = is_enabled
+	_auto_preference = false
+	if is_instance_valid(_button):
+		_button.set_pressed_no_signal(false)
+	_update_button_visual()
+	_set_battle_log_mode()
+	_log("AUTO COMPANIONS %s" % ("ON" if _enabled else "OFF"))
 	if _enabled:
 		_start_active_player_turn.call_deferred()
 
 
 func _update_button_visual() -> void:
 	_refresh_version_label()
-	if not is_instance_valid(_button):
+	_update_toggle_button_visual(_button, _enabled and not _companions_only)
+	_update_toggle_button_visual(_companions_button, _enabled and _companions_only)
+
+
+func _update_toggle_button_visual(button, is_enabled: bool) -> void:
+	if not is_instance_valid(button):
 		return
-	if _enabled:
-		_button.material = null
-		_button.modulate = Color.WHITE
+	if is_enabled:
+		button.material = null
+		button.modulate = Color.WHITE
 		return
-	_button.material = _get_disabled_icon_material()
-	_button.modulate = ICON_OFF_TINT
+	button.material = _get_disabled_icon_material()
+	button.modulate = ICON_OFF_TINT
 
 
 func _get_disabled_icon_material() -> ShaderMaterial:
@@ -315,7 +362,9 @@ func _get_disabled_icon_material() -> ShaderMaterial:
 func _on_player_turn(hero_id: int) -> void:
 	if _battle_closing:
 		return
+	_battle_log_stats["player_turns"] = int(_battle_log_stats.get("player_turns", 0)) + 1
 	_track_battle_round(hero_id)
+	_refresh_companion_mode_availability()
 	_log("player turn: hero %d | round %d" % [hero_id, _battle_round])
 	if _battle_waiting_for_first_player_turn:
 		_battle_waiting_for_first_player_turn = false
@@ -332,8 +381,13 @@ func _start_active_player_turn() -> void:
 	var controller = _turns.active_player_controller
 	if controller == null or not controller.active or not controller.controlled_object.is_alive():
 		return
+	if _companions_only and _is_main_hero_controller(controller):
+		_battle_log_stats["manual_main_turns"] = int(_battle_log_stats.get("manual_main_turns", 0)) + 1
+		_log("AUTO COMPANIONS - main hero turn remains manual")
+		return
 
 	_turn_running = true
+	_battle_log_stats["automated_turns"] = int(_battle_log_stats.get("automated_turns", 0)) + 1
 	_active_controller = controller
 	_decisions_this_turn = 0
 	_pending_action = ""
@@ -352,6 +406,13 @@ func _decide_next_action() -> void:
 	if not _enabled or not _turn_running or not _is_current_controller_valid(controller):
 		_finish_active_turn()
 		return
+	if _companions_only and _is_main_hero_controller(controller):
+		# A mode switch can happen while the old AUTO action is resolving. Keep
+		# the remaining main-hero AP for the player instead of ending that turn.
+		_turn_running = false
+		_active_controller = null
+		_pending_action = ""
+		return
 	if _pending_action != "":
 		return
 	if _decisions_this_turn >= MAX_DECISIONS_PER_TURN:
@@ -366,6 +427,7 @@ func _decide_next_action() -> void:
 		return
 
 	_decisions_this_turn += 1
+	_record_auto_plan(plan)
 	if plan.kind == "attack" or plan.kind == "support" or plan.kind == "ultimate" or plan.kind == "consumable":
 		var ability = plan.ability
 		var target: Vector2i = plan.target
@@ -676,6 +738,10 @@ func _choose_plan(controller) -> Dictionary:
 
 func _attack_makes_progress(attack: Dictionary) -> bool:
 	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_effect_hits", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or int(attack.get("traps_destroyed", 0)) > 0 or int(attack.get("objects_repositioned", 0)) > 0 or bool(attack.get("fall", false)))
+
+
+func _attack_makes_enemy_progress(attack: Dictionary) -> bool:
+	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_effect_hits", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or bool(attack.get("fall", false)) or not attack.get("killed_enemy_controllers", []).is_empty())
 
 
 
@@ -1762,6 +1828,8 @@ func _choose_best_attack_from_cell(controller, start: Vector2i, current_incoming
 	var abilities = _get_available_combat_abilities(controller)
 	var best := {}
 	var best_score := -INF
+	var best_enemy_action := {}
+	var best_enemy_score := -INF
 	var last_enemy_controller = null
 	var remaining_enemy_cells := _enemy_cells()
 	if remaining_enemy_cells.size() == 1:
@@ -1792,12 +1860,22 @@ func _choose_best_attack_from_cell(controller, start: Vector2i, current_incoming
 				if float(result.score) > finisher_score:
 					finisher_score = float(result.score)
 					finisher = result
+			# Clearing a trap or moving a neutral object is useful only when no
+			# legal action can affect an enemy. Otherwise the objective and safety
+			# both favour spending this AP on the enemy first.
+			if _attack_makes_enemy_progress(result) and float(result.score) > best_enemy_score:
+				best_enemy_score = float(result.score)
+				best_enemy_action = result
 			if result.score > best_score:
 				best_score = result.score
 				best = result
 	if not finisher.is_empty():
 		finisher["reason"] = "LAST ENEMY FINISHER - " + str(finisher.reason)
 		return finisher
+	if not best_enemy_action.is_empty():
+		return best_enemy_action
+	if not best.is_empty() and (int(best.get("traps_destroyed", 0)) > 0 or int(best.get("objects_repositioned", 0)) > 0):
+		best["reason"] = "NO ENEMY HIT - BOARD ACTION FALLBACK - " + str(best.reason)
 	return best
 
 
@@ -2816,11 +2894,15 @@ func _has_living_enemies() -> bool:
 func _stop_after_victory() -> void:
 	if _battle_closing:
 		return
+	_write_battle_summary("victory")
 	_enabled = false
+	_companions_only = false
 	_battle_ui_visible = false
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
-		_set_auto_button_visible(false)
+	if is_instance_valid(_companions_button):
+		_companions_button.set_pressed_no_signal(false)
+	_set_auto_button_visible(false)
 	_refresh_version_label()
 	_turn_running = false
 	_active_controller = null
@@ -2870,6 +2952,54 @@ func _ability_is_push(ability) -> bool:
 
 func _direction_from_to(from: Vector2i, to: Vector2i) -> Vector2i:
 	return Vector2i(signi(to.x - from.x), signi(to.y - from.y))
+
+
+func _get_main_hero_controller():
+	if _turns == null:
+		return null
+	# Dead Weight keeps the player-selected hero in party slot zero; recruited
+	# companions follow it regardless of initiative or the current active turn.
+	for player_controller in _turns.player_controllers:
+		if player_controller != null and is_instance_valid(player_controller) and player_controller.controlled_object != null:
+			return player_controller
+	return null
+
+
+func _is_main_hero_controller(controller) -> bool:
+	return controller != null and controller == _get_main_hero_controller()
+
+
+func _has_living_companions() -> bool:
+	return _living_companion_count() > 0
+
+
+func _living_companion_count() -> int:
+	if _turns == null:
+		return 0
+	var main_hero = _get_main_hero_controller()
+	if main_hero == null:
+		return 0
+	var count := 0
+	for player_controller in _turns.player_controllers:
+		if player_controller == null or player_controller == main_hero or not is_instance_valid(player_controller):
+			continue
+		if player_controller.controlled_object != null and player_controller.controlled_object.is_alive():
+			count += 1
+	return count
+
+
+func _refresh_companion_mode_availability() -> void:
+	var companions_available := _has_living_companions()
+	if _companions_only and not companions_available:
+		_companions_only = false
+		_companions_preference = false
+		_enabled = false
+		_set_battle_log_mode()
+		_log("AUTO COMPANIONS disabled - no living companions")
+	if is_instance_valid(_companions_button):
+		_companions_button.set_pressed_no_signal(_enabled and _companions_only)
+	_set_auto_button_visible(_battle_ui_visible)
+	_update_button_visual()
 
 
 func _candidate_append(cells: Array[Vector2i], cell: Vector2i) -> void:
@@ -3124,6 +3254,73 @@ func _track_battle_round(hero_id: int) -> void:
 	_round_hero_ids[hero_id] = true
 
 
+func _reset_battle_log_stats() -> void:
+	_battle_log_stats = {
+		"mode": "OFF",
+		"modes_used": "",
+		"player_turns": 0,
+		"automated_turns": 0,
+		"manual_main_turns": 0,
+		"actions": 0,
+		"moves": 0,
+		"enemy_damage": 0,
+		"enemy_effect_hits": 0,
+		"enemy_push_hits": 0,
+		"traps_destroyed": 0,
+		"objects_repositioned": 0
+	}
+	_battle_summary_logged = false
+
+
+func _set_battle_log_mode() -> void:
+	if _battle_log_stats.is_empty():
+		return
+	var mode := "OFF"
+	if _enabled:
+		mode = "AUTO COMPANIONS" if _companions_only else "AUTO"
+	_battle_log_stats["mode"] = mode
+	var modes_used := str(_battle_log_stats.get("modes_used", ""))
+	if not modes_used.split(", ").has(mode):
+		_battle_log_stats["modes_used"] = modes_used + ", " + mode if not modes_used.is_empty() else mode
+
+
+func _record_auto_plan(plan: Dictionary) -> void:
+	if _battle_log_stats.is_empty():
+		return
+	var kind := str(plan.get("kind", "unknown"))
+	if kind == "move":
+		_battle_log_stats["moves"] = int(_battle_log_stats.get("moves", 0)) + 1
+		return
+	if kind == "attack" or kind == "support" or kind == "ultimate" or kind == "consumable":
+		_battle_log_stats["actions"] = int(_battle_log_stats.get("actions", 0)) + 1
+		_battle_log_stats["enemy_damage"] = int(_battle_log_stats.get("enemy_damage", 0)) + int(plan.get("enemy_damage", 0)) + int(plan.get("enemy_effect_damage", 0))
+		_battle_log_stats["enemy_effect_hits"] = int(_battle_log_stats.get("enemy_effect_hits", 0)) + int(plan.get("enemy_effect_hits", 0))
+		_battle_log_stats["enemy_push_hits"] = int(_battle_log_stats.get("enemy_push_hits", 0)) + int(plan.get("enemy_push_hits", 0))
+		_battle_log_stats["traps_destroyed"] = int(_battle_log_stats.get("traps_destroyed", 0)) + int(plan.get("traps_destroyed", 0))
+		_battle_log_stats["objects_repositioned"] = int(_battle_log_stats.get("objects_repositioned", 0)) + int(plan.get("objects_repositioned", 0))
+
+
+func _write_battle_summary(result: String) -> void:
+	if _battle_summary_logged or _battle_log_stats.is_empty():
+		return
+	_battle_summary_logged = true
+	_log("BATTLE SUMMARY | result=%s | modes=%s | rounds=%d | player_turns=%d | auto_turns=%d | manual_main=%d | actions=%d | moves=%d | enemy_damage=%d | effect_hits=%d | push_hits=%d | traps=%d | objects=%d" % [
+		result,
+		str(_battle_log_stats.get("modes_used", "OFF")),
+		_battle_round,
+		int(_battle_log_stats.get("player_turns", 0)),
+		int(_battle_log_stats.get("automated_turns", 0)),
+		int(_battle_log_stats.get("manual_main_turns", 0)),
+		int(_battle_log_stats.get("actions", 0)),
+		int(_battle_log_stats.get("moves", 0)),
+		int(_battle_log_stats.get("enemy_damage", 0)),
+		int(_battle_log_stats.get("enemy_effect_hits", 0)),
+		int(_battle_log_stats.get("enemy_push_hits", 0)),
+		int(_battle_log_stats.get("traps_destroyed", 0)),
+		int(_battle_log_stats.get("objects_repositioned", 0))
+	])
+
+
 func _find_node_with_script_path(node: Node, script_path: String) -> Node:
 	if node == null or not is_instance_valid(node):
 		return null
@@ -3140,26 +3337,5 @@ func _find_node_with_script_path(node: Node, script_path: String) -> Node:
 
 
 func _log(message: String) -> void:
-	var entry := "[AUTO] " + message
-	print(entry)
-	# Console logging remains available for diagnostics, but the combat overlay
-	# receives messages only while the player has explicitly enabled AUTO.
-	if not _enabled or not _battle_ui_visible:
-		return
-	_debug_lines.append(entry)
-	if _debug_lines.size() > 5:
-		_debug_lines.pop_front()
-	_refresh_debug_label()
-
-
-func _refresh_debug_label() -> void:
-	if not is_instance_valid(_debug_label):
-		return
-	_debug_label.visible = _enabled and _battle_ui_visible
-	if not _debug_label.visible:
-		_debug_label.text = ""
-		return
-	var text := "AUTO DEBUG\n"
-	for entry in _debug_lines:
-		text += entry + "\n"
-	_debug_label.text = text.strip_edges()
+	# Keep all diagnostic detail in Godot's log instead of covering the board.
+	print("[AUTO] " + message)

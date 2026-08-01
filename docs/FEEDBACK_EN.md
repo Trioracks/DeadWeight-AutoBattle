@@ -10,4 +10,4 @@ Please send this to the author in Steam chat.
 - What should have happened:
 - Does it reproduce: always / sometimes / once
 
-Attach a full screenshot and, for startup or update issues, `DeadWeightAutoBattle\AutoBattle.update.log`.
+Attach a full screenshot and `DeadWeightAutoBattle\AutoBattle.update.log` for a startup/update issue, or the final `[AUTO]` lines from `Godot\app_userdata\Dead_weight\logs\godot.log` for a tactical decision.
