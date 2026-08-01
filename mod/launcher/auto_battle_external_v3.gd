@@ -1547,6 +1547,14 @@ func _choose_best_attack_from_cell(controller, start: Vector2i, current_incoming
 	var abilities = _get_available_combat_abilities(controller)
 	var best := {}
 	var best_score := -INF
+	var last_enemy_controller = null
+	var remaining_enemy_cells := _enemy_cells()
+	if remaining_enemy_cells.size() == 1:
+		var last_enemy = _move_system.get_character(remaining_enemy_cells[0])
+		if last_enemy != null:
+			last_enemy_controller = last_enemy.my_controller
+	var finisher := {}
+	var finisher_score := -INF
 
 	for ability in abilities:
 		if _is_consumable_ability(controller, ability):
@@ -1561,9 +1569,20 @@ func _choose_best_attack_from_cell(controller, start: Vector2i, current_incoming
 			if not ability.check_terms(start, target):
 				continue
 			var result := _score_attack(controller, ability, start, target, current_incoming)
+			# A remaining enemy is the encounter objective. If it can be killed now,
+			# never let an otherwise valuable trap attack consume this turn. The
+			# movement planners use this same selector, so they also avoid moving for
+			# a trap when a legal finisher is already available.
+			if last_enemy_controller != null and result.get("killed_enemy_controllers", []).has(last_enemy_controller):
+				if float(result.score) > finisher_score:
+					finisher_score = float(result.score)
+					finisher = result
 			if result.score > best_score:
 				best_score = result.score
 				best = result
+	if not finisher.is_empty():
+		finisher["reason"] = "LAST ENEMY FINISHER - " + str(finisher.reason)
+		return finisher
 	return best
 
 

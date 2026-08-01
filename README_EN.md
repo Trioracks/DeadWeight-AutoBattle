@@ -33,6 +33,7 @@ AUTO uses available game controllers, so the game itself applies energy costs, c
 - evaluates next-turn danger cells, traps, map edges, health and energy for the whole party;
 - treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
 - prefers safe kills, pushes into a fall, and multi-target attacks;
+- when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;
 - may keep energy and end on a safe cell instead of returning into an attack;
 - reads abilities, talents, some equipment and available consumables;
 - uses active skills granted by weapons and equipment; block, evasion and energy recovery are used only for a proven rescue;
