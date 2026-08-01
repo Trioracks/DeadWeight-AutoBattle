@@ -1,6 +1,6 @@
 # AUTO Battle — Dead Weight mod | EN
 
-**Mod: Dead Weight — AUTO Battle** adds `AUTO` and `AUTO COMPANIONS` buttons in the top-right corner during combat only. `AUTO` controls the whole party; `AUTO COMPANIONS` appears when a living companion is present and controls companions only, leaving the main hero manual. The modes are mutually exclusive and remembered for the next battle.
+**Mod: Dead Weight — AUTO Battle** adds `AUTO` and `ONLY COMPANIONS` buttons in the top-right corner during combat only. `AUTO` controls the whole party; `ONLY COMPANIONS` appears when a living companion is present and controls companions only, leaving the main hero manual. The modes are mutually exclusive and remembered for the next battle.
 
 [Download latest version](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest) | [Source code](https://github.com/Trioracks/DeadWeight-AutoBattle)
 
@@ -30,7 +30,7 @@ If the network is unavailable or verification fails, the installed version stays
 
 ## AUTO behaviour
 
-- `AUTO` evaluates future attack cells, traps, map edges, health and energy for the whole party; `AUTO COMPANIONS` applies the same tactics to companions only;
+- `AUTO` evaluates future attack cells, traps, map edges, health and energy for the whole party; `ONLY COMPANIONS` applies the same tactics to companions only;
 - treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
 - looks for safe kills, pushes into a fall and attacks hitting multiple enemies;
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;

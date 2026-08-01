@@ -95,6 +95,7 @@ func _set_auto_button_visible(is_visible: bool) -> void:
 		var companions_visible := is_visible and _has_living_companions()
 		_companions_button.visible = companions_visible
 		_companions_button.mouse_filter = Control.MOUSE_FILTER_STOP if companions_visible else Control.MOUSE_FILTER_IGNORE
+	_refresh_version_label()
 
 
 func _bind_game() -> void:
@@ -240,17 +241,18 @@ func _ensure_overlay() -> void:
 	root.add_child(_button)
 
 	_companions_button = Button.new()
-	_companions_button.text = "AUTO COMPANIONS"
+	_companions_button.text = "ONLY COMPANIONS"
 	_companions_button.name = "auto_companions_button"
 	_companions_button.toggle_mode = true
-	_companions_button.tooltip_text = "AUTO COMPANIONS - main hero stays manual"
+	_companions_button.tooltip_text = "ONLY COMPANIONS - main hero stays manual"
 	_companions_button.mouse_filter = Control.MOUSE_FILTER_STOP
-	_companions_button.custom_minimum_size = Vector2(138.0, 42.0)
+	_companions_button.custom_minimum_size = Vector2(166.0, 42.0)
 	_companions_button.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_companions_button.offset_left = -286.0
-	_companions_button.offset_top = 35.0
-	_companions_button.offset_right = -144.0
-	_companions_button.offset_bottom = 77.0
+	# Keep the secondary mode directly beneath AUTO, right-aligned with it.
+	_companions_button.offset_left = -248.0
+	_companions_button.offset_top = 82.0
+	_companions_button.offset_right = -82.0
+	_companions_button.offset_bottom = 124.0
 	_companions_button.toggled.connect(_on_companions_toggled)
 	root.add_child(_companions_button)
 
@@ -258,7 +260,7 @@ func _ensure_overlay() -> void:
 	_companions_button.set_pressed_no_signal(_enabled and _companions_only)
 	_set_auto_button_visible(_battle_ui_visible)
 	_update_button_visual()
-	_log("buttons ready - AUTO " + ("ON" if _enabled and not _companions_only else "OFF") + ", COMPANIONS " + ("ON" if _enabled and _companions_only else "OFF"))
+	_log("buttons ready - AUTO " + ("ON" if _enabled and not _companions_only else "OFF") + ", ONLY COMPANIONS " + ("ON" if _enabled and _companions_only else "OFF"))
 
 
 
@@ -285,6 +287,11 @@ func _add_version_label(parent: Control) -> void:
 func _refresh_version_label() -> void:
 	if not is_instance_valid(_version_label):
 		return
+	var companions_visible := is_instance_valid(_companions_button) and _companions_button.visible
+	_version_label.offset_left = -78.0
+	_version_label.offset_top = 130.0 if companions_visible else 82.0
+	_version_label.offset_right = -8.0
+	_version_label.offset_bottom = 146.0 if companions_visible else 98.0
 	_version_label.text = "v" + MOD_VERSION
 	_version_label.visible = _battle_ui_visible and _enabled
 
@@ -327,7 +334,7 @@ func _on_companions_toggled(is_enabled: bool) -> void:
 		_button.set_pressed_no_signal(false)
 	_update_button_visual()
 	_set_battle_log_mode()
-	_log("AUTO COMPANIONS %s" % ("ON" if _enabled else "OFF"))
+	_log("ONLY COMPANIONS %s" % ("ON" if _enabled else "OFF"))
 	if _enabled:
 		_start_active_player_turn.call_deferred()
 
@@ -383,7 +390,7 @@ func _start_active_player_turn() -> void:
 		return
 	if _companions_only and _is_main_hero_controller(controller):
 		_battle_log_stats["manual_main_turns"] = int(_battle_log_stats.get("manual_main_turns", 0)) + 1
-		_log("AUTO COMPANIONS - main hero turn remains manual")
+		_log("ONLY COMPANIONS - main hero turn remains manual")
 		return
 
 	_turn_running = true
@@ -3056,7 +3063,7 @@ func _refresh_companion_mode_availability() -> void:
 		_companions_preference = false
 		_enabled = false
 		_set_battle_log_mode()
-		_log("AUTO COMPANIONS disabled - no living companions")
+		_log("ONLY COMPANIONS disabled - no living companions")
 	if is_instance_valid(_companions_button):
 		_companions_button.set_pressed_no_signal(_enabled and _companions_only)
 	_set_auto_button_visible(_battle_ui_visible)
@@ -3338,7 +3345,7 @@ func _set_battle_log_mode() -> void:
 		return
 	var mode := "OFF"
 	if _enabled:
-		mode = "AUTO COMPANIONS" if _companions_only else "AUTO"
+		mode = "ONLY COMPANIONS" if _companions_only else "AUTO"
 	_battle_log_stats["mode"] = mode
 	var modes_used := str(_battle_log_stats.get("modes_used", ""))
 	if not modes_used.split(", ").has(mode):

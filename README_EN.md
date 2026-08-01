@@ -2,7 +2,7 @@
 
 [Русский](README.md) | [English](README_EN.md)
 
-A Windows test build of AUTO Battle for the Steam version of **Dead Weight**. The mod adds `AUTO` and `AUTO COMPANIONS` buttons during combat: the first controls the whole party, while the second controls companions only and leaves the main hero manual. The modes are mutually exclusive and remembered for the next encounter.
+A Windows test build of AUTO Battle for the Steam version of **Dead Weight**. The mod adds `AUTO` and `ONLY COMPANIONS` buttons during combat: the first controls the whole party, while the second controls companions only and leaves the main hero manual. The modes are mutually exclusive and remembered for the next encounter.
 
 ## Player installation
 
@@ -29,7 +29,7 @@ If GitHub is unavailable, a hash does not match, or an update is interrupted, th
 
 AUTO uses available game controllers, so the game itself applies energy costs, cooldowns, animations and effects. The current test logic:
 
-- shows `AUTO` only in combat and `AUTO COMPANIONS` only when a living companion is present; the modes are mutually exclusive;
+- shows `AUTO` only in combat and `ONLY COMPANIONS` only when a living companion is present; the modes are mutually exclusive;
 - evaluates next-turn danger cells, traps, map edges, health and energy for the whole party;
 - treats every cell highlighted by the game for a prepared attack as dangerous, including the far end of a line strike;
 - prefers safe kills, pushes into a fall, and multi-target attacks;
