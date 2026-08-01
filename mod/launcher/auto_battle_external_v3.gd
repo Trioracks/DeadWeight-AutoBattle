@@ -289,7 +289,7 @@ func _add_version_label(parent: Control) -> void:
 func _refresh_version_label() -> void:
 	if not is_instance_valid(_version_label):
 		return
-	var companions_visible := is_instance_valid(_companions_button) and _companions_button.visible
+	var companions_visible: bool = is_instance_valid(_companions_button) and _companions_button.visible
 	_version_label.offset_left = -78.0
 	_version_label.offset_top = 130.0 if companions_visible else 82.0
 	_version_label.offset_right = -8.0

@@ -1,6 +1,6 @@
 # AUTO Battle — Dead Weight mod | EN
 
-**Current version: v0.2.03.**
+**Current version: v0.2.04.**
 
 **Dead Weight — AUTO Battle** adds two buttons in the top-right corner during combat only:
 
