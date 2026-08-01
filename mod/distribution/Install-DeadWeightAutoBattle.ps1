@@ -234,7 +234,7 @@ function Configure-SteamLaunchOption([string]$LauncherPath) {
         $userdata = Join-Path $steamRoot 'userdata'
         if (-not (Test-Path -LiteralPath $userdata)) { continue }
         foreach ($config in Get-ChildItem -LiteralPath $userdata -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'config\localconfig.vdf' }) {
-            if (Test-Path -LiteralPath $config -and (Set-LaunchOptionInVdf $config $steamOption)) { $configured++ }
+            if ((Test-Path -LiteralPath $config) -and (Set-LaunchOptionInVdf $config $steamOption)) { $configured++ }
         }
     }
 
