@@ -2,7 +2,8 @@ param(
     [string]$GameDirectory = '',
     [switch]$NoDesktopShortcut,
     [switch]$NoInteractive,
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    [switch]$SkipSteamLaunchOption
 )
 
 $ErrorActionPreference = 'Stop'
@@ -140,6 +141,112 @@ function Create-DesktopShortcut([string]$Destination, [string]$GamePath) {
     }
 }
 
+function Find-VdfBlock([string]$Text, [string]$Key) {
+    $needle = '"' + $Key + '"'
+    $offset = 0
+    while ($offset -lt $Text.Length) {
+        $keyAt = $Text.IndexOf($needle, $offset, [StringComparison]::OrdinalIgnoreCase)
+        if ($keyAt -lt 0) { return $null }
+
+        $openAt = $keyAt + $needle.Length
+        while ($openAt -lt $Text.Length -and [char]::IsWhiteSpace($Text[$openAt])) { $openAt++ }
+        if ($openAt -ge $Text.Length -or $Text[$openAt] -ne '{') {
+            $offset = $keyAt + $needle.Length
+            continue
+        }
+
+        $depth = 0
+        $inString = $false
+        $escaped = $false
+        for ($cursor = $openAt; $cursor -lt $Text.Length; $cursor++) {
+            $character = $Text[$cursor]
+            if ($inString) {
+                if ($escaped) {
+                    $escaped = $false
+                } elseif ($character -eq '\') {
+                    $escaped = $true
+                } elseif ($character -eq '"') {
+                    $inString = $false
+                }
+                continue
+            }
+            if ($character -eq '"') {
+                $inString = $true
+            } elseif ($character -eq '{') {
+                $depth++
+            } elseif ($character -eq '}') {
+                $depth--
+                if ($depth -eq 0) {
+                    return [pscustomobject]@{ Open = $openAt; Close = $cursor }
+                }
+            }
+        }
+        throw "Steam configuration has an unterminated '$Key' block."
+    }
+    return $null
+}
+
+function Escape-VdfValue([string]$Value) {
+    return $Value.Replace('"', '\"')
+}
+
+function Set-LaunchOptionInVdf([string]$ConfigPath, [string]$LaunchOption) {
+    $text = [IO.File]::ReadAllText($ConfigPath)
+    $block = Find-VdfBlock $text $appId
+    if ($null -eq $block) { return $false }
+
+    $bodyStart = $block.Open + 1
+    $bodyLength = $block.Close - $bodyStart
+    $body = $text.Substring($bodyStart, $bodyLength)
+    $launchMatch = [regex]::Match($body, '(?m)^(?<indent>[\t ]*)"LaunchOptions"\s+"(?<value>(?:\\.|[^"\\])*)"')
+    $escapedOption = Escape-VdfValue $LaunchOption
+    if ($launchMatch.Success) {
+        $replacement = $launchMatch.Groups['indent'].Value + '"LaunchOptions"' + '  ' + '"' + $escapedOption + '"'
+        $body = $body.Remove($launchMatch.Index, $launchMatch.Length).Insert($launchMatch.Index, $replacement)
+    } else {
+        $indentMatch = [regex]::Match($body, '(?m)^(?<indent>[\t ]+)"')
+        $indent = if ($indentMatch.Success) { $indentMatch.Groups['indent'].Value } else { '    ' }
+        $body += [Environment]::NewLine + $indent + '"LaunchOptions"' + '  ' + '"' + $escapedOption + '"'
+    }
+
+    $updated = $text.Substring(0, $bodyStart) + $body + $text.Substring($block.Close)
+    if ($updated -ceq $text) { return $true }
+    $backup = "$ConfigPath.autobattle-backup"
+    Copy-Item -LiteralPath $ConfigPath -Destination $backup -Force
+    [IO.File]::WriteAllText($ConfigPath, $updated, [Text.UTF8Encoding]::new($false))
+    $verified = [IO.File]::ReadAllText($ConfigPath)
+    if (-not $verified.Contains($escapedOption)) { throw "Steam launch option could not be verified in $ConfigPath." }
+    return $true
+}
+
+function Configure-SteamLaunchOption([string]$LauncherPath) {
+    $steamProcesses = @(Get-Process -Name 'steam' -ErrorAction SilentlyContinue)
+    if ($steamProcesses.Count -gt 0) {
+        return [pscustomobject]@{
+            configured = $false
+            reason = 'Steam is running. Close Steam completely, then run this installer once more.'
+        }
+    }
+
+    $steamOption = 'cmd /d /s /c ""{0}" %command%"' -f $LauncherPath
+    $configured = 0
+    foreach ($steamRoot in Get-SteamRoots) {
+        $userdata = Join-Path $steamRoot 'userdata'
+        if (-not (Test-Path -LiteralPath $userdata)) { continue }
+        foreach ($config in Get-ChildItem -LiteralPath $userdata -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'config\localconfig.vdf' }) {
+            if (Test-Path -LiteralPath $config -and (Set-LaunchOptionInVdf $config $steamOption)) { $configured++ }
+        }
+    }
+
+    if ($configured -eq 0) {
+        return [pscustomobject]@{
+            configured = $false
+            reason = 'No Steam account configuration containing Dead Weight was found. The launch command remains on the clipboard.'
+        }
+    }
+    return [pscustomobject]@{ configured = $true; reason = "Configured $configured Steam account(s)." }
+}
+
 try {
     if (-not (Test-GameDirectory $GameDirectory)) { $GameDirectory = Find-DeadWeightDirectory }
     if (-not (Test-GameDirectory $GameDirectory) -and -not $NoInteractive) { $GameDirectory = Select-GameDirectory }
@@ -183,8 +290,23 @@ try {
     $steamOption = 'cmd /d /s /c ""{0}" %command%"' -f $steamLauncher
     if (-not $NoInteractive) { try { Set-Clipboard -Value $steamOption } catch { } }
 
+    $steamConfiguration = if ($SkipSteamLaunchOption) {
+        [pscustomobject]@{ configured = $false; reason = 'Steam launch-option setup was skipped.' }
+    } else {
+        Configure-SteamLaunchOption $steamLauncher
+    }
+
     Add-Type -AssemblyName System.Windows.Forms
-    $message = "Installed in:`n$destination`n`nA desktop shortcut was created: $shortcut`n`nFor Steam: open Dead Weight > Properties > Launch Options and press Ctrl+V. The command is already copied to your clipboard.`n`nFrom now on, this launch path checks the official GitHub release before every start. Updates are SHA-256 verified; only DeadWeightAutoBattle is replaced."
+    $launchStatus = if ($steamConfiguration.configured) {
+        'Steam Play is configured to start AUTO Battle.'
+    } else {
+        "Steam Play was not changed: $($steamConfiguration.reason)"
+    }
+    $message = "Installed in:`n$destination`n`nA desktop shortcut was created: $shortcut`n`n$launchStatus`n`nThe Steam launch command is also copied to the clipboard as a fallback.`n`nFrom now on, this launch path checks the official GitHub release before every start. Updates are SHA-256 verified; only DeadWeightAutoBattle is replaced."
+    if ($NoInteractive) {
+        Write-Output "STEAM_LAUNCH_OPTION_CONFIGURED=$($steamConfiguration.configured)"
+        Write-Output "STEAM_LAUNCH_OPTION_STATUS=$($steamConfiguration.reason)"
+    }
     if (-not $NoInteractive) {
         [System.Windows.Forms.MessageBox]::Show($message, 'Dead Weight - AUTO Battle installed', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
     }

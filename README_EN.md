@@ -9,8 +9,8 @@ A Windows test build of AUTO Battle for the Steam version of **Dead Weight**. Th
 1. Download `DeadWeight_AUTO_Battle_Install_vX.Y.Z.zip` from the [latest release](https://github.com/Trioracks/DeadWeight-AutoBattle/releases/latest).
    `deadweight-autobattle-update.json` is a technical compatibility file for automatic migration of old installations; do not download it manually.
 2. Extract it anywhere temporary and double-click `Install-DeadWeightAutoBattle.cmd`.
-3. The installer automatically searches **every** Steam library on the user's machine, including libraries on other drives. If Steam cannot locate the game, it asks to choose the folder that contains `Dead_weight.exe`. It creates `DeadWeightAutoBattle` next to the game and copies the Steam launch command to the clipboard.
-4. In Steam, open **Dead Weight -> Properties -> Launch Options**, press `Ctrl+V`, then close the window. This is the only manual step required for the Steam **Play** button to use the mod.
+3. Close Steam. The installer automatically searches **every** Steam library on the user's machine, including libraries on other drives. If Steam cannot locate the game, it asks to choose the folder that contains `Dead_weight.exe`. It creates `DeadWeightAutoBattle` next to the game and configures Steam's permanent launch option itself.
+4. Open Steam and use its ordinary **Play** button. The launch command is copied to the clipboard as a fallback, but pasting it manually is not required.
 
 The installer also creates a `Dead Weight - AUTO Battle` desktop shortcut. It is a useful fallback, although Steam launch options are preferable for the Steam overlay.
 

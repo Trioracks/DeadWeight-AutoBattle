@@ -1189,7 +1189,7 @@ func _get_offensive_effect_values(ability) -> Dictionary:
 			var duration_raw = effect.get("duration")
 			var duration := maxi(1, int(duration_raw)) if duration_raw != null else 1
 			if signature.contains("bleed") or signature.contains("poison") or signature.contains("burn") or signature.contains("damage_over_time"):
-				var delayed_damage := amount * duration
+				var delayed_damage: int = int(amount) * int(duration)
 				values["damage"] = int(values.damage) + delayed_damage
 				values.effects.append("%s %d" % ["bleed" if signature.contains("bleed") else "DoT", delayed_damage])
 			elif signature.contains("sleep") or signature.contains("stun") or signature.contains("freeze") or signature.contains("immov") or signature.contains("silence"):
@@ -2484,7 +2484,7 @@ func _get_combat_stance(controller) -> Dictionary:
 			continue
 		var weapon_weight := 4 if weapon_abilities.has(str(ability.tag)) else 1
 		var has_reach := int(ability.get_max_distance()) >= 2
-		var is_ranged_type := ability.ability_type == character_ability.ABILITY_TYPE.RANGE or ability.ability_type == character_ability.ABILITY_TYPE.CAST or ability.ability_type == character_ability.ABILITY_TYPE.THROW
+		var is_ranged_type: bool = ability.ability_type == character_ability.ABILITY_TYPE.RANGE or ability.ability_type == character_ability.ABILITY_TYPE.CAST or ability.ability_type == character_ability.ABILITY_TYPE.THROW
 		if is_ranged_type or effect_attack and has_reach or weapon_weight > 1 and has_reach:
 			if has_reach:
 				ranged_strength += weapon_weight

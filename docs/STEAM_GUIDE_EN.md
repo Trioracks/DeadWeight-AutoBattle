@@ -12,15 +12,15 @@
 1. Download the only ZIP, `DeadWeight_AUTO_Battle_Install_vX.Y.Z.zip`.
 2. Extract it anywhere temporary.
 3. Double-click `Install-DeadWeightAutoBattle.cmd`.
-4. The installer finds Dead Weight in every Steam library on any drive. If it cannot, select the game folder containing `Dead_weight.exe`.
-5. The installer copies the launch command. In Steam, open **Dead Weight → Properties → Launch Options** and press `Ctrl+V`.
-6. Use Steam’s ordinary **Play** button.
+4. Close Steam completely. The installer finds Dead Weight in every Steam library on any drive. If it cannot, select the game folder containing `Dead_weight.exe`.
+5. The installer configures Steam's permanent launch option itself. It also copies the command to the clipboard as a fallback.
+6. Open Steam and use its ordinary **Play** button.
 
 The installer also creates a fallback desktop shortcut named `Dead Weight — AUTO Battle`.
 
 ## Existing older installations
 
-If the mod was installed before v0.1.18, start Steam once with the existing launch option. The small compatibility JSON automatically moves the old setup to the new format. If no update appears, simply run the new ZIP installer once; saves and game files are never touched.
+If the mod was installed before v0.1.25 or the `AUTO` button does not appear, close Steam completely and run the current ZIP installer once: it restores the permanent Steam launch option. Saves and game files are never touched.
 
 ## Automatic updates
 
