@@ -36,6 +36,7 @@ var _turn_running := false
 var _active_controller = null
 var _decisions_this_turn := 0
 var _pending_action := ""
+var _pending_move_target = null
 var _overlay: CanvasLayer
 var _overlay_root: Control
 var _button = null
@@ -55,11 +56,14 @@ var _rage_followup_controller_id := -1
 var _rage_followup_plan: Dictionary = {}
 var _last_stand_followup_controller_id := -1
 var _last_stand_followup_plan: Dictionary = {}
+var _move_followup_controller_id := -1
+var _move_followup_plan: Dictionary = {}
 var _last_party_profile := ""
 var _battle_round := 0
 var _round_hero_ids: Dictionary = {}
 var _battle_log_stats: Dictionary = {}
 var _battle_summary_logged := false
+var _static_board_edge_risk: Dictionary = {}
 
 
 func _ready() -> void:
@@ -81,6 +85,7 @@ func _hide_auto_outside_battle() -> void:
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
+	_pending_move_target = null
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
 	if is_instance_valid(_companions_button):
@@ -132,6 +137,7 @@ func _on_battle_ready() -> void:
 	_battle_waiting_for_first_player_turn = true
 	_battle_round = 0
 	_round_hero_ids.clear()
+	_static_board_edge_risk.clear()
 	_reset_battle_log_stats()
 	_enabled = false
 	_companions_only = false
@@ -180,6 +186,7 @@ func _on_battle_end() -> void:
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
+	_pending_move_target = null
 	_approach_memory.clear()
 	_last_consumable_catalog.clear()
 	_last_talent_profile.clear()
@@ -193,6 +200,8 @@ func _on_battle_end() -> void:
 	_rage_followup_plan.clear()
 	_last_stand_followup_controller_id = -1
 	_last_stand_followup_plan.clear()
+	_move_followup_controller_id = -1
+	_move_followup_plan.clear()
 	if is_instance_valid(_button):
 		_button.set_pressed_no_signal(false)
 	if is_instance_valid(_companions_button):
@@ -206,6 +215,7 @@ func _on_battle_end() -> void:
 
 	_battle_round = 0
 	_round_hero_ids.clear()
+	_static_board_edge_risk.clear()
 func _ensure_overlay() -> void:
 	if is_instance_valid(_button) and is_instance_valid(_companions_button):
 		return
@@ -400,6 +410,7 @@ func _start_active_player_turn() -> void:
 	_active_controller = controller
 	_decisions_this_turn = 0
 	_pending_action = ""
+	_pending_move_target = null
 	_equipment_skill_uses_this_turn.erase(str(controller.get_instance_id()))
 	_log_state(controller)
 	_decide_next_action.call_deferred()
@@ -421,6 +432,7 @@ func _decide_next_action() -> void:
 		_turn_running = false
 		_active_controller = null
 		_pending_action = ""
+		_pending_move_target = null
 		return
 	if _pending_action != "":
 		return
@@ -429,7 +441,13 @@ func _decide_next_action() -> void:
 		_finish_active_turn()
 		return
 
+	var decision_started_us := Time.get_ticks_usec()
 	var plan := _choose_plan(controller)
+	var decision_elapsed_ms := float(Time.get_ticks_usec() - decision_started_us) / 1000.0
+	# Keep timing in the file log only. It provides a concrete performance
+	# signal without returning the old AUTO DEBUG overlay to the game screen.
+	if decision_elapsed_ms >= 40.0:
+		_log("PERF decision %.1f ms | hero %d | AP %d" % [decision_elapsed_ms, int(controller.get_instance_id()), int(controller.my_params.action_points)])
 	if plan.is_empty():
 		_log("no legal useful action")
 		_finish_active_turn()
@@ -468,7 +486,11 @@ func _decide_next_action() -> void:
 		if plan.has("last_stand_followup"):
 			_last_stand_followup_controller_id = int(controller.get_instance_id())
 			_last_stand_followup_plan = Dictionary(plan.get("last_stand_followup", {})).duplicate()
+		if bool(plan.get("commit_follow_up", false)):
+			_move_followup_controller_id = int(controller.get_instance_id())
+			_move_followup_plan = Dictionary(plan.get("follow_up", {})).duplicate()
 		_pending_action = "move"
+		_pending_move_target = move_target
 		_log("MOVE -> %s | %s" % [move_target, plan.reason])
 		controller.movement_done.connect(_on_auto_move_done.bind(controller, _battle_nonce), CONNECT_ONE_SHOT)
 		controller.set_movement_mode(true)
@@ -544,9 +566,15 @@ func _on_auto_move_done(controller, battle_nonce: int) -> void:
 		return
 	if controller != _active_controller or _pending_action != "move":
 		return
+	var expected = _pending_move_target
+	_pending_move_target = null
 	_pending_action = ""
+	if expected != null and controller.controlled_object != null and controller.controlled_object.obj_position != expected:
+		_log("MOVE ENDPOINT MISMATCH - expected %s, reached %s; replanning remaining AP" % [str(expected), str(controller.controlled_object.obj_position)])
+		_decide_next_action.call_deferred()
+		return
 	_remember_approach_move(controller)
-	_log("move completed")
+	_log("move completed - reached %s" % str(controller.controlled_object.obj_position))
 	_decide_next_action.call_deferred()
 
 
@@ -556,6 +584,9 @@ func _on_move_timeout(controller, battle_nonce: int) -> void:
 	if controller != _active_controller or not _turn_running or _pending_action != "move":
 		return
 	_pending_action = ""
+	_pending_move_target = null
+	_move_followup_controller_id = -1
+	_move_followup_plan.clear()
 	_log("move timeout - reevaluating")
 	_decide_next_action.call_deferred()
 
@@ -575,73 +606,156 @@ func _choose_plan(controller) -> Dictionary:
 	var stored_last_stand := _choose_last_stand_followup(controller, incoming)
 	if not stored_last_stand.is_empty():
 		return stored_last_stand
+	var stored_move_followup := _choose_committed_move_followup(controller, incoming)
+	if not stored_move_followup.is_empty():
+		return stored_move_followup
+	# Nothing that follows can create a legal action without AP. Avoid scanning
+	# every future firing square after movement has already spent the turn.
+	if int(controller.my_params.action_points) <= 0:
+		return {
+			"kind": "hold",
+			"reason": "SAFE HOLD - no AP remaining"
+		}
 	var self_threatened := _is_cell_threatened(start)
+	var lethal_self_threat := self_threatened and incoming >= int(controller.my_params.hp)
 	var threatened_party := _get_threatened_player_controllers()
 	var other_party_members_threatened := threatened_party.duplicate()
 	other_party_members_threatened.erase(controller)
+	var lethal_party_members := _get_lethally_threatened_player_controllers()
+	lethal_party_members.erase(controller)
 	var support := _choose_best_support(controller)
 	var attack := _choose_best_attack(controller, incoming)
+	var can_cover_party_rescue := self_threatened and incoming > 0 and incoming < int(controller.my_params.hp) and not _cell_has_forced_movement_threat(start)
+	var party_rescue_attack := _choose_party_rescue_attack(controller, incoming) if can_cover_party_rescue and not lethal_party_members.is_empty() else {}
 	var ready_equipment_attack := not attack.is_empty() and _is_equipped_item_ability(controller.my_params, attack.get("ability", null)) and _attack_makes_progress(attack)
 	var equipment_setup := _choose_equipment_setup_skill(controller, attack)
 	# Rage is planned before ordinary movement: it may turn a one-damage melee
 	# strike into an immediate kill, and therefore opens a safe retreat.
-	var rage_ultimate := _choose_rage_ultimate(controller, incoming)
+	var rage_ultimate := {}
 	# Scripted boss actions do not always expose an ordinary prepared red zone.
 	# At critical HP, reserve the whole turn for a real retreat instead of
 	# trusting an empty telegraph and ending in a one-shot range.
-	var boss_caution_move := _choose_boss_caution_move(controller)
+	var boss_caution_move := {}
 	# This is deliberately separate from the generic dodge scorer: a ranged
 	# hero should choose a safe one-step firing position over a farther retreat.
-	var safe_hit_step := _choose_best_safe_move_for_hit(controller, incoming)
-	var safe_step := _choose_best_move(controller, incoming, true, true)
-	var safe_escape := _choose_best_move(controller, incoming, true, false, self_threatened)
-	var attack_then_escape := _choose_attack_then_safe_escape(controller, attack, incoming)
-	var route_clear := _choose_route_clear_action(controller, incoming)
-	var recovery_trade := _choose_kill_recovery_trade(controller, incoming)
-	var last_stand_step := _choose_last_stand_step_attack(controller, incoming)
+	var safe_hit_step := {}
+	var safe_step := {}
+	# Some prepared actions follow their target after a move, while their current
+	# red overlay is evaluated at the old position. At lethal HP, do not spend the
+	# whole turn on a cell that is merely clear in that stale overlay: first seek
+	# a cell outside every mechanically legal retarget of the displayed actions.
+	var retarget_safe_escape := _choose_best_move(controller, incoming, true, false, true, -1, [], true) if lethal_self_threat else {}
+	# When the strict escape succeeded, reuse it instead of scanning every board
+	# cell a second time with the weaker rule. This removes a full planner pass
+	# from exactly the turns that used to produce a visible delay.
+	var safe_escape := retarget_safe_escape
+	# Some generated attacks mark every reachable cell even though one of them
+	# still takes strictly less than the hero's remaining HP. Keep this separate
+	# from a real dodge: it is used only when no zero-damage exit was proven,
+	# and it never accepts control, a trap, a fall, or a push zone.
+	var damage_limited_escape := {}
+	var attack_then_escape := {}
+	var route_clear := {}
+	var recovery_trade := {}
+	var last_stand_step := {}
 
 	var consumable_offense := _choose_best_consumable_offense(controller, incoming)
 	var consumable_protection := _choose_best_consumable_protection(controller)
 	var escape_energy_ability := _choose_escape_energy_ability(controller)
 	var escape_energy := _choose_escape_energy_consumable(controller)
+	# A durable character must spend a survivable hit to prevent a companion's
+	# certain death. Previously a hero at 3 HP could dodge one incoming damage
+	# and leave a 1-HP healer under three damage, even when a legal hit could
+	# remove the healer's attacker. The rescue must still be mechanically proved
+	# by the game's own targeting and threat scanner.
+	if can_cover_party_rescue and not lethal_party_members.is_empty():
+		if not party_rescue_attack.is_empty():
+			party_rescue_attack["reason"] = "SAVE LETHAL COMPANION - " + str(party_rescue_attack.reason)
+			return party_rescue_attack
+		if not consumable_offense.is_empty() and int(consumable_offense.get("party_threats_after", threatened_party.size())) < threatened_party.size():
+			consumable_offense["reason"] = "SAVE LETHAL COMPANION WITH ITEM - " + str(consumable_offense.reason)
+			return consumable_offense
+		if not support.is_empty() and support.get("target_controller", null) != controller and bool(support.get("saves_lethal", false)):
+			support["reason"] = "SAVE LETHAL COMPANION - " + str(support.reason)
+			return support
+		if not consumable_protection.is_empty() and consumable_protection.get("target_controller", null) != controller and bool(consumable_protection.get("saves_lethal", false)):
+			consumable_protection["reason"] = "SAVE LETHAL COMPANION WITH ITEM - " + str(consumable_protection.reason)
+			return consumable_protection
 
 	# The same displayed zones that the game paints red are a hard constraint.
 	# Damage alone is insufficient: a zero-damage push can still throw a hero off
 	# the board, so we only remain when this action removes that exact threat.
 	if self_threatened:
+		rage_ultimate = _choose_rage_ultimate(controller, incoming)
 		if not rage_ultimate.is_empty() and (bool(rage_ultimate.get("self_safe_after", false)) or bool(rage_ultimate.get("rage_has_safe_escape", false))):
 			rage_ultimate["reason"] = "RAGE CLEAR THREAT - " + str(rage_ultimate.reason)
 			return rage_ultimate
 		if not attack.is_empty() and bool(attack.self_safe_after):
 			attack["reason"] = "CLEAR CURRENT THREAT - " + str(attack.reason)
 			return attack
-		if not attack_then_escape.is_empty():
-			return attack_then_escape
+		if not retarget_safe_escape.is_empty():
+			retarget_safe_escape["reason"] = "RETARGET-SAFE ESCAPE - " + str(retarget_safe_escape.reason)
+			return retarget_safe_escape
+		if not lethal_self_threat:
+			attack_then_escape = _choose_attack_then_safe_escape(controller, attack, incoming)
+			if not attack_then_escape.is_empty():
+				return attack_then_escape
 
 		# A short dodge is worthwhile only if it immediately creates a real hit.
 		# The dedicated selector preserves the exact firing square instead of
 		# letting a generic safety score choose a farther, inactive retreat.
-		if not safe_hit_step.is_empty():
+		if not lethal_self_threat:
+			safe_hit_step = _choose_best_safe_move_for_hit(controller, incoming)
+		if not lethal_self_threat and not safe_hit_step.is_empty():
 			safe_hit_step["reason"] = "DODGE THEN HIT - " + str(safe_hit_step.reason)
 			return safe_hit_step
 		# Vitality is a verified, renewable resource: trade one direct point only
 		# when this exact hero can kill the sole adjacent attacker next turn and
 		# restore every point that it intentionally accepts.
+		recovery_trade = _choose_kill_recovery_trade(controller, incoming)
 		if not recovery_trade.is_empty():
 			return recovery_trade
 
-		if not safe_escape.is_empty():
+		if not lethal_self_threat:
+			safe_escape = _choose_best_move(controller, incoming, true, false, true)
+		if not lethal_self_threat and not safe_escape.is_empty():
 			safe_escape["reason"] = "FULL-ENERGY ESCAPE - " + str(safe_escape.reason)
 			return safe_escape
-		if not safe_step.is_empty():
-			safe_step["reason"] = "ONLY SAFE DODGE - " + str(safe_step.reason)
-			return safe_step
-		# No route is currently open. A movable barrel/crate can be a tactical
-		# door: resolve the legal push first, then re-evaluate the board and use
-		# the remaining AP for the newly opened safe escape.
-		if not route_clear.is_empty():
+		if not lethal_self_threat:
+			safe_step = _choose_best_move(controller, incoming, true, true)
+	if not lethal_self_threat and not safe_step.is_empty():
+		safe_step["reason"] = "ONLY SAFE DODGE - " + str(safe_step.reason)
+		return safe_step
+	# A one-shot companion cannot treat any remaining red cell as an emergency
+	# exit. The boss and several control skills expose no immediate HP damage in
+	# the compact forecast, yet resolve after movement and can still kill or lock
+	# the character. Prefer a proved boss-caution lane before any last resort.
+	boss_caution_move = _choose_boss_caution_move(controller)
+	if not boss_caution_move.is_empty():
+		boss_caution_move["reason"] = "LETHAL THREAT - " + str(boss_caution_move.reason)
+		return boss_caution_move
+	# Do not turn a scanner false-negative into a suicide. A legal tile that
+	# leaves HP above zero is objectively better than a speculative attack
+		# when every fully clear tile was rejected. This is still below every
+		# clean escape and excludes all control / push / terrain hazards.
+		damage_limited_escape = _choose_emergency_damage_limited_retreat(controller, incoming)
+		if not damage_limited_escape.is_empty():
+			damage_limited_escape["reason"] = "EMERGENCY DAMAGE-LIMITED RETREAT - " + str(damage_limited_escape.reason)
+			return damage_limited_escape
+		# No route is currently open.  A movable barrel/crate can sometimes be a
+		# tactical door, but moving it only *might* reveal an exit after the
+		# animation.  At lethal HP that is not a valid defence: spending AP first
+		# can leave the hero with too little energy to use the newly opened route.
+		# Keep that speculative board action for survivable turns only; the
+		# emergency branches below must retain every remaining AP for a proven
+		# dodge, cleanse, protection item, or a real threat-clearing hit.
+		route_clear = _choose_route_clear_action(controller, incoming)
+		var route_clear_is_survivable := incoming > 0 and incoming < int(controller.my_params.hp) and not _cell_has_forced_movement_threat(start)
+		if not route_clear.is_empty() and route_clear_is_survivable:
 			route_clear["reason"] = "CLEAR ROUTE THEN ESCAPE - " + str(route_clear.reason)
 			return route_clear
+		if not route_clear.is_empty():
+			_log("ROUTE CLEAR REJECTED - lethal/forced threat; retain AP for a verified escape or defence")
 		if not consumable_offense.is_empty() and bool(consumable_offense.get("self_safe_after", false)):
 			consumable_offense["reason"] = "NO SAFE EXIT - CLEAR THREAT WITH ITEM - " + str(consumable_offense.reason)
 			return consumable_offense
@@ -655,6 +769,14 @@ func _choose_plan(controller) -> Dictionary:
 		if not consumable_protection.is_empty() and consumable_protection.get("target_controller", null) == controller and (bool(consumable_protection.saves_lethal) or bool(consumable_protection.prevents_health_damage)):
 			consumable_protection["reason"] = "NO SAFE EXIT - EMERGENCY ITEM - " + str(consumable_protection.reason)
 			return consumable_protection
+		# Some ranged companions carry a ready tactical swap instead of a normal
+		# movement escape. It was previously omitted because it is neither damage
+		# nor a heal. Use it only when the game's own targeting checks approve an
+		# enemy cell that is already proved free of damage, control and forced
+		# movement after the exchange.
+		var swap_escape := _choose_swap_escape(controller)
+		if not swap_escape.is_empty():
+			return swap_escape
 		# If every escape, control action and protection option has failed, use a
 		# survivable hit to make progress instead of handing the enemy a free turn.
 		# This is deliberately below all dodge/kill/protection branches above and
@@ -668,6 +790,7 @@ func _choose_plan(controller) -> Dictionary:
 		# damages or kills something over an empty skip; paths still reject traps,
 		# pits, obstacles and self-damage. A current-cell hit is the fallback when
 		# it produces more progress than stepping in.
+		last_stand_step = _choose_last_stand_step_attack(controller, incoming)
 		var direct_last_stand_score := float(int(attack.get("enemy_damage", 0))) * 650.0 + float(int(attack.get("enemy_push_hits", 0))) * 9000.0 + float(attack.get("killed_enemy_controllers", []).size()) * ENEMY_KILL_SCORE
 		if not last_stand_step.is_empty() and float(last_stand_step.get("score", -INF)) >= direct_last_stand_score:
 			return last_stand_step
@@ -713,12 +836,20 @@ func _choose_plan(controller) -> Dictionary:
 	var rage_followup := _choose_rage_followup(controller, incoming)
 	if not rage_followup.is_empty():
 		return rage_followup
-	if not boss_caution_move.is_empty() and (attack.is_empty() or not bool(attack.lethal) and not bool(attack.fall)):
+	if attack.is_empty() or not _attack_makes_progress(attack):
+		safe_hit_step = _choose_best_safe_move_for_hit(controller, incoming)
+		boss_caution_move = _choose_boss_caution_move(controller) if safe_hit_step.is_empty() else {}
+	# A boss's untelegraphed-action warning must not make a ranged companion
+	# endlessly kite while it already has a real, safe shot. Damage and a proven
+	# firing step take priority; boss caution is only the fallback when this turn
+	# cannot make combat progress.
+	if not boss_caution_move.is_empty() and not _attack_makes_progress(attack) and safe_hit_step.is_empty():
 		return boss_caution_move
 
 	# A Rage setup that converts the selected weapon hit into a kill is stronger
 	# than a routine approach step. The next decision uses the exact stored hit,
 	# then spends all remaining AP on the already verified retreat if needed.
+	rage_ultimate = _choose_rage_ultimate(controller, incoming)
 	if not rage_ultimate.is_empty():
 		return rage_ultimate
 
@@ -749,11 +880,19 @@ func _choose_plan(controller) -> Dictionary:
 	var staging := _choose_best_staging_move(controller, incoming)
 	if not staging.is_empty():
 		return staging
+	# A healer/shielder cannot create enemy progress directly.  It still must not
+	# become a statue at the edge of the board: keep it in safe support range of
+	# the main hero so the next threatened turn has a real defensive option.
+	var support_escort := _choose_support_escort_move(controller)
+	if not support_escort.is_empty():
+		return support_escort
 	if _should_hold_stalemate(controller):
+		_log_hold_diagnostics(controller, incoming, "stalemate guard")
 		return {
 			"kind": "hold",
 			"reason": "STALEMATE GUARD - safe staging positions exhausted; waiting for enemy"
 		}
+	_log_hold_diagnostics(controller, incoming, "no safe hit or next-turn staging path")
 	return {
 		"kind": "hold",
 		"reason": "SAFE HOLD - no safe hit or next-turn staging path"
@@ -904,6 +1043,38 @@ func _choose_last_stand_followup(controller, current_incoming: int) -> Dictionar
 	attack["reason"] = "LAST STAND FOLLOW-UP - execute stored attack instead of skipping; " + str(attack.reason)
 	return attack
 
+
+# A safe firing square is selected with the exact follow-up attack already
+# mechanically proven. Replanning after the movement used to discard that
+# attack and turn a promised "step then hit" into a needless retreat. Keep the
+# plan only for this explicit selector, and discard it if the landing cell has
+# become red, controlled or forced-movement-dangerous while the animation ran.
+func _choose_committed_move_followup(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or int(controller.get_instance_id()) != _move_followup_controller_id:
+		return {}
+	var planned := _move_followup_plan.duplicate()
+	_move_followup_controller_id = -1
+	_move_followup_plan.clear()
+	var hero = controller.controlled_object
+	if hero == null or not hero.is_alive() or planned.is_empty():
+		return {}
+	var position: Vector2i = hero.obj_position
+	if _is_cell_threatened(position) or _is_cell_control_threatened(position) or _cell_has_forced_movement_threat(position):
+		_log("COMMITTED STEP+HIT CANCELLED - landing is no longer fully safe; replanning")
+		return {}
+	var ability = planned.get("ability", null)
+	var target: Vector2i = planned.get("target", position)
+	if ability == null or max(0, int(ability.get_final_ap_cost())) > int(controller.my_params.action_points):
+		return {}
+	if not ability.can_mechanically_attack(position, target, false, false, false) or not ability.check_terms(position, target) or not ability.can_attack_check(position, target):
+		_log("COMMITTED STEP+HIT CANCELLED - target became illegal; replanning")
+		return {}
+	var attack := _score_attack(controller, ability, position, target, current_incoming)
+	if not _attack_makes_progress(attack) or int(attack.get("self_damage", 0)) > 0:
+		return {}
+	attack["reason"] = "COMMITTED STEP+HIT - execute verified follow-up; " + str(attack.reason)
+	return attack
+
 func _get_kill_recovery_hp(controller) -> int:
 	if controller == null or not is_instance_valid(controller) or controller.my_params == null:
 		return 0
@@ -986,6 +1157,66 @@ func _choose_kill_recovery_trade(controller, incoming: int) -> Dictionary:
 func _choose_best_attack(controller, current_incoming: int) -> Dictionary:
 	var hero = controller.controlled_object
 	return _choose_best_attack_from_cell(controller, hero.obj_position, current_incoming, int(controller.my_params.action_points))
+
+
+# Select an attack specifically for a party rescue rather than merely taking
+# the highest personal-damage score. This is used when another player is about
+# to die and the current character can safely absorb its own announced hit.
+func _choose_party_rescue_attack(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var start: Vector2i = controller.controlled_object.obj_position
+	var available_ap := int(controller.my_params.action_points)
+	var threatened_before := _get_threatened_player_controllers().size()
+	var lethal_before := _get_lethally_threatened_player_controllers()
+	lethal_before.erase(controller)
+	if threatened_before <= 0 or lethal_before.is_empty():
+		return {}
+	var best := {}
+	var best_score := -INF
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or _is_consumable_ability(controller, ability):
+			continue
+		if int(ability.get_final_ap_cost()) > available_ap:
+			continue
+		for target: Vector2i in _candidate_targets(ability, start):
+			if not ability.can_mechanically_attack(start, target, false, false, false):
+				continue
+			if not ability.check_terms(start, target):
+				continue
+			var result := _score_attack(controller, ability, start, target, current_incoming)
+			if int(result.get("self_damage", 0)) > 0:
+				continue
+			var removed_threats: Array = result.get("removed_threat_controllers", [])
+			var rescued := 0
+			for party_member in lethal_before:
+				var party_cell: Vector2i = party_member.controlled_object.obj_position
+				if not _is_cell_threatened(party_cell, removed_threats):
+					rescued += 1
+			if rescued <= 0:
+				continue
+			var score := float(result.get("score", -INF)) + float(rescued) * 100000.0
+			if bool(result.get("lethal", false)) or bool(result.get("fall", false)):
+				score += 12000.0
+			if score <= best_score:
+				continue
+			best_score = score
+			best = result
+	return best
+
+
+func _get_lethally_threatened_player_controllers() -> Array:
+	var lethal: Array = []
+	if _turns == null:
+		return lethal
+	for player_controller in _turns.player_controllers:
+		if player_controller == null or player_controller.controlled_object == null or not player_controller.controlled_object.is_alive():
+			continue
+		var cell: Vector2i = player_controller.controlled_object.obj_position
+		var incoming := _incoming_damage_at(cell)
+		if incoming >= int(player_controller.my_params.hp) or _cell_has_forced_movement_threat(cell):
+			lethal.append(player_controller)
+	return lethal
 
 
 func _get_rage_status(params) -> Dictionary:
@@ -1239,27 +1470,57 @@ func _print_rage_profile(controller) -> void:
 
 
 
+func _apply_support_effect_values(values: Dictionary, effect) -> void:
+	if effect == null:
+		return
+	var signature := _effect_signature(effect)
+	var amount := _effect_amount(effect)
+	if effect is full_heal_effect_class or signature.contains("full_heal"):
+		values["heal"] = 999
+	elif effect is heal_effect_class or signature.contains("heal"):
+		values["heal"] = int(values["heal"]) + amount
+	elif effect is change_defence_effect_class or signature.contains("defence") or signature.contains("defense") or signature.contains("armor") or signature.contains("armour"):
+		values["defence"] = int(values["defence"]) + amount
+	elif effect is block_damage_oneshot_effect_class or signature.contains("block_damage") or signature.contains("ignore_incoming"):
+		values["block"] = int(values["block"]) + max(1, amount)
+	elif signature.contains("dodge") or signature.contains("evad"):
+		values["evasion"] = true
+	elif signature.contains("action_point") or signature.contains("actionpoint") or signature.contains("spurt"):
+		values["energy"] = int(values["energy"]) + amount
+
+
 func _get_support_values(ability) -> Dictionary:
 	var values := {"heal": 0, "defence": 0, "block": 0, "evasion": false, "energy": 0}
 	if ability == null:
 		return values
+	# Healing and shielding spells expose their actual effects on active
+	# mechanics.  Looking only at get_all_passive_effects() made a ready
+	# heal/shield companion look like it had no defensive action at all.
+	# Collect both forms, but process each effect object once so a resource that
+	# is exposed by both APIs cannot inflate a one-hit protection estimate.
+	var seen_effects: Dictionary = {}
 	for effect in ability.get_all_passive_effects():
 		if effect == null:
 			continue
-		var signature := _effect_signature(effect)
-		var amount := _effect_amount(effect)
-		if effect is full_heal_effect_class:
-			values["heal"] = 999
-		elif effect is heal_effect_class or signature.contains("heal"):
-			values["heal"] = int(values["heal"]) + amount
-		elif effect is change_defence_effect_class or signature.contains("defence") or signature.contains("defense") or signature.contains("armor") or signature.contains("armour"):
-			values["defence"] = int(values["defence"]) + amount
-		elif effect is block_damage_oneshot_effect_class or signature.contains("block_damage") or signature.contains("ignore_incoming"):
-			values["block"] = int(values["block"]) + max(1, amount)
-		elif signature.contains("dodge") or signature.contains("evad"):
-			values["evasion"] = true
-		elif signature.contains("action_point") or signature.contains("actionpoint") or signature.contains("spurt"):
-			values["energy"] = int(values["energy"]) + amount
+		var effect_id := str(effect.get_instance_id())
+		if seen_effects.has(effect_id):
+			continue
+		seen_effects[effect_id] = true
+		_apply_support_effect_values(values, effect)
+	for mechanic in ability.get_full_mechanics_array():
+		if mechanic == null:
+			continue
+		var effects = mechanic.get("all_effects")
+		if effects == null:
+			continue
+		for effect in effects:
+			if effect == null:
+				continue
+			var effect_id := str(effect.get_instance_id())
+			if seen_effects.has(effect_id):
+				continue
+			seen_effects[effect_id] = true
+			_apply_support_effect_values(values, effect)
 	return values
 
 
@@ -1480,9 +1741,11 @@ func _score_support(controller, ability, target_controller, target: Vector2i, va
 		return {}
 	var shield_estimate := maxi(0, incoming - defence_amount)
 	var hp_after_support := min(int(target_params.get_max_hp()), int(target_params.hp) + heal_amount)
-	# Ordinary armour is only trusted against a non-lethal hit. A one-shot block
-	# or explicit evasion is a deterministic protection effect, so an equipment
-	# skill with one of those effects may also save a lethal telegraph.
+	# Defence is not a literal damage block: penetration and boss modifiers can
+	# still make a displayed "shield +2" fail against a lethal hit. Only healing
+	# above the incoming damage, an explicit one-shot block, or evasion proves a
+	# lethal save. This prevents a 1-HP companion from wasting its final AP on
+	# armour and then dying under the same telegraph.
 	var saves_lethal: bool = incoming >= int(target_params.hp) and (hp_after_support > incoming or block_amount >= incoming or evasion)
 	var prevents_health_damage: bool = incoming < int(target_params.hp) and (shield_estimate == 0 or block_amount >= incoming or evasion)
 	var cost: int = max(0, int(ability.get_final_ap_cost()))
@@ -1851,6 +2114,47 @@ func _support_target_can_escape(target_controller) -> bool:
 	return not _choose_best_move(target_controller, _incoming_damage_at(target), true, false).is_empty()
 
 
+func _choose_swap_escape(controller) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var start: Vector2i = controller.controlled_object.obj_position
+	var ap := int(controller.my_params.action_points)
+	if ap <= 0:
+		return {}
+	var best := {}
+	var best_score := -INF
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or _is_consumable_ability(controller, ability) or not str(ability.tag).to_lower().contains("swap"):
+			continue
+		if int(ability.get_final_ap_cost()) > ap:
+			continue
+		for target in _enemy_cells():
+			# A swap puts the caster on the selected enemy's cell. Do not use it
+			# as a speculative move into any currently harmful cell.
+			if _move_system.can_fall_from_cell(target) or _move_system.has_trap(target) or _move_system.is_obstancle_cell(target):
+				continue
+			if _is_cell_threatened(target) or _is_cell_control_threatened(target) or _cell_has_forced_movement_threat(target):
+				continue
+			if not ability.can_mechanically_attack(start, target, false, false, false):
+				continue
+			if not ability.check_terms(start, target) or not ability.can_attack_check(start, target):
+				continue
+			var exits := _get_future_escape_profile(controller, target, max(ap, int(controller.my_params.action_points_max)))
+			var score := float(int(exits.get("exits", 0))) * 1700.0 + float(int(exits.get("max_path", 0))) * 250.0
+			score -= float(_edge_risk(target)) * 850.0
+			if score <= best_score:
+				continue
+			best_score = score
+			best = {
+				"kind": "support",
+				"ability": ability,
+				"target": target,
+				"score": score,
+				"reason": "SWAP ESCAPE - safe enemy cell %s, future exits %d, reach %d" % [str(target), int(exits.get("exits", 0)), int(exits.get("max_path", 0))]
+			}
+	return best
+
+
 # Equipment skills live on item modifiers (skill_new_tag), not necessarily in
 # the hero's base ability array. Resolve the actual equipped skills first and
 # use a private, owner-bound copy only when the game has not already supplied
@@ -2087,6 +2391,19 @@ func _candidate_targets(ability, start: Vector2i) -> Array[Vector2i]:
 		_candidate_append(cells, enemy_cell)
 		for targeting_cell in ability.get_targeting_cells_for_cell_attack(start, enemy_cell):
 			_candidate_append(cells, targeting_cell)
+	# Dead Weight's targeting helper does not consistently return the
+	# intermediate selection cell for a two-tile line strike ("Выпад").
+	# Probe every board cell only for that exceptional strike; applying the same
+	# fallback to ordinary attacks turns each tactical evaluation into thousands
+	# of costly game-side legality checks.
+	if _ability_requires_boardwide_target_probe(ability):
+		var probe_range := max(1, int(ability.get_max_distance()))
+		for board_cell in _move_system.get_used_cells():
+			# The missing UI target is adjacent to the caster's two-tile reach;
+			# cells beyond that maximum can never become legal and are not worth a
+			# costly mechanics/area evaluation.
+			if start.distance_to(board_cell) <= float(probe_range) + 0.5:
+				_candidate_append(cells, board_cell)
 
 	# Traps are attackable board objects. They must be candidate targets too,
 	# otherwise a fully safe board can still become an AFK stalemate.
@@ -2100,6 +2417,12 @@ func _candidate_targets(ability, start: Vector2i) -> Array[Vector2i]:
 			_candidate_append(cells, object_cell)
 
 	return cells
+
+
+func _ability_requires_boardwide_target_probe(ability) -> bool:
+	if ability == null or not ability.get_is_ability_an_attack():
+		return false
+	return str(ability.tag).to_lower().begins_with("abil_hit_2t_")
 
 
 func _score_attack(controller, ability, start: Vector2i, target: Vector2i, current_incoming: int) -> Dictionary:
@@ -2293,7 +2616,8 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		"objects_repositioned": objects_repositioned,
 		"traps_destroyed": traps_destroyed,
 		"enemy_hit_count": enemy_hit_count,
-		"killed_enemy_controllers": killed_enemy_controllers
+		"killed_enemy_controllers": killed_enemy_controllers,
+		"removed_threat_controllers": removed_threat_controllers
 	}
 
 
@@ -2447,12 +2771,13 @@ func _choose_best_safe_move_for_hit(controller, current_incoming: int) -> Dictio
 			"kind": "move",
 			"target": cell,
 			"score": score,
+			"commit_follow_up": true,
 			"follow_up": follow_up,
 			"reason": "SAFE HIT POSITION %s, path %d, move AP %d, then %s -> %s" % [str(cell), path.size(), move_cost, str(follow_up.ability.tag), str(follow_up.target)]
 		}
 	return best
 
-func _choose_best_move(controller, current_incoming: int, require_safe: bool = false, one_ap_only: bool = false, flee: bool = false, ap_budget: int = -1, excluded_threat_controllers: Array = []) -> Dictionary:
+func _choose_best_move(controller, current_incoming: int, require_safe: bool = false, one_ap_only: bool = false, flee: bool = false, ap_budget: int = -1, excluded_threat_controllers: Array = [], require_retarget_safe: bool = false) -> Dictionary:
 	var hero = controller.controlled_object
 	var start: Vector2i = hero.obj_position
 	var params = controller.my_params
@@ -2461,9 +2786,19 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 	var spurt_data = params.get_detailed_spurt_data()
 	var ignores_traps := _hero_ignores_traps(params)
 	var combat_stance := _get_combat_stance(controller)
+	var priority_enemy = _get_party_priority_enemy()
+	var priority_position: Vector2i = priority_enemy.obj_position if priority_enemy != null and priority_enemy.is_alive() else start
+	var start_priority_distance: float = start.distance_to(priority_position)
+	var desired_distance: float = float(int(combat_stance.get("preferred_distance", 1)))
+	var can_attack_at_all := _has_attack_capability(controller)
 	var best := {}
 	var best_score := -INF
 	var current_threatened := _is_cell_threatened(start, excluded_threat_controllers)
+	# Build the expensive "could this prepared ability follow me here?" map once
+	# per escape search. Calling the old probe for every candidate re-ran ability
+	# geometry for the whole board dozens of times and caused the visible pause
+	# before a critical move.
+	var retargeted_cells: Dictionary = _get_potentially_retargeted_prepared_cells(controller, start, excluded_threat_controllers) if require_retarget_safe else {}
 
 	if ap <= 0:
 		return best
@@ -2498,6 +2833,8 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 			continue
 		if require_safe and threatened:
 			continue
+		if require_retarget_safe and retargeted_cells.has(cell):
+			continue
 
 		var follow_up := _choose_best_attack_from_cell(controller, cell, incoming, ap - energy)
 		var score := _score_move_cell(controller, cell, path.size(), incoming, current_incoming, hp, threatened, current_threatened, combat_stance)
@@ -2506,9 +2843,27 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 		if flee:
 			var full_turn_ap := max(ap, int(params.action_points_max))
 			escape_profile = _get_future_escape_profile(controller, cell, full_turn_ap)
+			# A 1-HP companion must never call a corner with zero future exits an
+			# escape. It becomes a delayed death as soon as enemy intents refresh.
+			if not _is_main_hero_controller(controller) and int(escape_profile.exits) <= 0:
+				continue
 			score += float(int(escape_profile.exits)) * 1100.0
 			score += float(int(escape_profile.max_path)) * 300.0
-			score += _nearest_enemy_distance(cell) * 650.0
+			# A safe retreat must remain a combat position.  The old scorer rewarded
+			# maximum distance unconditionally, which made a healthy ranged hero and
+			# an untargeted melee hero retreat farther from the encounter every turn.
+			var priority_distance: float = cell.distance_to(priority_position)
+			var next_turn_attack := _choose_best_attack_from_cell(controller, cell, incoming, full_turn_ap)
+			if _attack_makes_progress(next_turn_attack):
+				var next_turn_exit := _has_attack_followup_exit(controller, cell, next_turn_attack, full_turn_ap)
+				score += 11500.0 if next_turn_exit else 1800.0
+				if bool(next_turn_attack.get("lethal", false)) or bool(next_turn_attack.get("fall", false)):
+					score += 9000.0
+			elif can_attack_at_all and priority_distance < start_priority_distance:
+				score += (start_priority_distance - priority_distance) * 3600.0
+			score += 1400.0 - absf(priority_distance - desired_distance) * 420.0
+			if priority_distance > desired_distance + 1.0:
+				score -= (priority_distance - desired_distance - 1.0) * 1000.0
 			score += float(energy) * 180.0
 			score -= float(_edge_risk(cell)) * 350.0
 		if not flee and not follow_up.is_empty():
@@ -2536,6 +2891,217 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 				"follow_up_lethal": follow_up_lethal,
 				"reason": "danger %s->%s, incoming %d->%d, path %d, AP %d, edge risk %d%s%s" % ["RED" if current_threatened else "CLEAR", "RED" if threatened else "CLEAR", current_incoming, incoming, path.size(), energy, _edge_risk(cell), follow_up_text, escape_text]
 			}
+	return best
+
+
+# A compact log-only explanation for a hold. It records why the move scanner
+# rejected the board without putting any debug text on the combat UI.
+func _log_hold_diagnostics(controller, current_incoming: int, context: String) -> void:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var params = controller.my_params
+	var ap := int(params.action_points)
+	var spurt_data = params.get_detailed_spurt_data()
+	var ignores_traps := _hero_ignores_traps(params)
+	var priority_enemy = _get_party_priority_enemy()
+	var priority_position: Vector2i = priority_enemy.obj_position if priority_enemy != null and priority_enemy.is_alive() else start
+	var counts := {
+		"occupied": 0,
+		"fall": 0,
+		"terrain": 0,
+		"trap": 0,
+		"path": 0,
+		"ap": 0,
+		"control": 0,
+		"red": 0,
+		"safe": 0
+	}
+	var best := {}
+	var best_score := -INF
+	for cell in _move_system.get_used_cells():
+		if cell == start:
+			continue
+		if _move_system.has_character(cell):
+			counts["occupied"] = int(counts["occupied"]) + 1
+			continue
+		if _move_system.can_fall_from_cell(cell):
+			counts["fall"] = int(counts["fall"]) + 1
+			continue
+		if _move_system.is_obstancle_cell(cell):
+			counts["terrain"] = int(counts["terrain"]) + 1
+			continue
+		if _move_system.has_trap(cell) and not ignores_traps:
+			counts["trap"] = int(counts["trap"]) + 1
+			continue
+		var trace = controller._trace_motion_path(start, cell, spurt_data)
+		if trace == null or not trace.has_valid_path() or (not ignores_traps and _movement_trace_steps_on_trap(trace, start)):
+			counts["path"] = int(counts["path"]) + 1
+			continue
+		var energy := int(trace.energy)
+		if energy > ap:
+			counts["ap"] = int(counts["ap"]) + 1
+			continue
+		if _is_cell_control_threatened(cell) or _cell_has_forced_movement_threat(cell):
+			counts["control"] = int(counts["control"]) + 1
+			continue
+		if _is_cell_threatened(cell):
+			counts["red"] = int(counts["red"]) + 1
+			continue
+		counts["safe"] = int(counts["safe"]) + 1
+		var distance: float = cell.distance_to(priority_position)
+		var next_turn_ap := max(ap, int(params.action_points_max))
+		var next_attack := _choose_best_attack_from_cell(controller, cell, 0, next_turn_ap)
+		var score := -distance * 1200.0 + float(_get_future_escape_profile(controller, cell, next_turn_ap).get("exits", 0)) * 900.0
+		if _attack_makes_progress(next_attack):
+			score += 8500.0 if _has_attack_followup_exit(controller, cell, next_attack, next_turn_ap) else 1200.0
+		if score > best_score:
+			best_score = score
+			best = {"target": cell, "distance": distance, "attack": next_attack}
+	var best_text := "none"
+	if not best.is_empty():
+		var next_attack: Dictionary = best.attack
+		var next_text := "approach only"
+		if _attack_makes_progress(next_attack):
+			next_text = "%s -> %s, exit %s" % [str(next_attack.ability.tag), str(next_attack.target), str(_has_attack_followup_exit(controller, Vector2i(best.target), next_attack, max(ap, int(params.action_points_max))))]
+		best_text = "%s dist %.1f; %s" % [str(best.target), float(best.distance), next_text]
+	_log("HOLD DIAGNOSTIC | %s | AP %d, incoming %d, priority %s | safe %d | rejected occupied %d, fall %d, terrain %d, trap %d, path %d, AP %d, control %d, red %d | best %s" % [context, ap, current_incoming, str(priority_position), int(counts["safe"]), int(counts["occupied"]), int(counts["fall"]), int(counts["terrain"]), int(counts["trap"]), int(counts["path"]), int(counts["ap"]), int(counts["control"]), int(counts["red"]), best_text])
+	var reach_strike := _find_best_two_tile_strike(controller, current_incoming)
+	if not reach_strike.is_empty():
+		_log("REACH STRIKE AVAILABLE AT HOLD | %s -> %s | %s" % [str(reach_strike.ability.tag), str(reach_strike.target), str(reach_strike.reason)])
+
+
+func _find_best_two_tile_strike(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var ap := int(controller.my_params.action_points)
+	var best := {}
+	var best_score := -INF
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or not str(ability.tag).to_lower().begins_with("abil_hit_2t_"):
+			continue
+		if int(ability.get_final_ap_cost()) > ap:
+			continue
+		for target: Vector2i in _candidate_targets(ability, start):
+			if not ability.can_mechanically_attack(start, target, false, false, false) or not ability.check_terms(start, target):
+				continue
+			var result := _score_attack(controller, ability, start, target, current_incoming)
+			if not _attack_makes_enemy_progress(result) or int(result.get("self_damage", 0)) > 0:
+				continue
+			if float(result.score) <= best_score:
+				continue
+			best_score = float(result.score)
+			best = result
+	return best
+
+
+# Tests a future attack plan from a virtual board position. Enemy intents can
+# still change next round, but this rejects an avoidable dead end: stepping
+# into range, spending attack AP, then having no terrain-safe exit at all.
+func _has_attack_followup_exit(controller, origin: Vector2i, attack: Dictionary, available_ap: int) -> bool:
+	if attack.is_empty():
+		return false
+	if bool(attack.get("lethal", false)) or bool(attack.get("fall", false)) or bool(attack.get("self_safe_after", false)):
+		return true
+	var ability = attack.get("ability", null)
+	if ability == null or bool(ability.cost_end_turn):
+		return false
+	var remaining_ap: int = available_ap - max(0, int(ability.get_final_ap_cost()))
+	return remaining_ap > 0 and _has_virtual_safe_escape(controller, origin, remaining_ap)
+
+
+func _has_virtual_safe_escape(controller, origin: Vector2i, available_ap: int) -> bool:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null or available_ap <= 0:
+		return false
+	var params = controller.my_params
+	var spurt_data = params.get_detailed_spurt_data()
+	var ignores_traps := _hero_ignores_traps(params)
+	for cell in _move_system.get_used_cells():
+		if cell == origin or _move_system.has_character(cell) or _move_system.can_fall_from_cell(cell):
+			continue
+		if _move_system.is_obstancle_cell(cell) or (_move_system.has_trap(cell) and not ignores_traps):
+			continue
+		var trace = controller._trace_motion_path(origin, cell, spurt_data)
+		if trace == null or not trace.has_valid_path() or int(trace.energy) > available_ap:
+			continue
+		if not ignores_traps and _movement_trace_steps_on_trap(trace, origin):
+			continue
+		if _is_cell_threatened(cell) or _is_cell_control_threatened(cell) or _cell_has_forced_movement_threat(cell):
+			continue
+		return true
+	return false
+
+
+# This is deliberately not a normal movement scorer.  It is reached only after
+# _choose_best_move has established that no completely clear destination is
+# available.  In that narrow case, an immediate, mechanically legal position
+# that leaves the hero alive is preferable to a "last stand" attack that ends
+# the turn under lethal damage.  The strict exclusions preserve the promise
+# that AUTO never deliberately walks into control, traps, pits or a prepared
+# forced-movement effect.
+func _choose_emergency_damage_limited_retreat(controller, current_incoming: int) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var params = controller.my_params
+	var hp := max(1, int(params.hp))
+	var ap := int(params.action_points)
+	if ap <= 0 or current_incoming <= 0 or current_incoming < hp:
+		return {}
+	var spurt_data = params.get_detailed_spurt_data()
+	var ignores_traps := _hero_ignores_traps(params)
+	var best := {}
+	var best_score := -INF
+	for cell in _move_system.get_used_cells():
+		if cell == start or _move_system.has_character(cell) or _move_system.can_fall_from_cell(cell):
+			continue
+		if _move_system.is_obstancle_cell(cell) or (_move_system.has_trap(cell) and not ignores_traps):
+			continue
+		var trace = controller._trace_motion_path(start, cell, spurt_data)
+		if trace == null or not trace.has_valid_path():
+			continue
+		var path: Array = trace.get_front_motion_path()
+		var energy := int(trace.energy)
+		if path.is_empty() or energy > ap:
+			continue
+		if not ignores_traps and _movement_trace_steps_on_trap(trace, start):
+			continue
+		# At exactly one HP a red overlay with zero *currently predicted* damage
+		# is not a valid compromise: delayed boss strikes and control zones can
+		# resolve after the move. A healthier hero may still use a strictly smaller
+		# announced hit as a last resort, but a one-shot companion cannot.
+		if (hp <= 1 and _is_cell_threatened(cell)) or _is_cell_control_threatened(cell) or _cell_has_forced_movement_threat(cell):
+			continue
+		var cell_incoming := _incoming_damage_at(cell)
+		# The only allowed compromise is a strictly smaller, non-lethal hit.
+		if cell_incoming >= hp or cell_incoming >= current_incoming:
+			continue
+		var exits := _get_future_escape_profile(controller, cell, max(ap, int(params.action_points_max)))
+		var score := float(current_incoming - cell_incoming) * 100000.0
+		score += float(int(exits.get("exits", 0))) * 1200.0
+		score += float(int(exits.get("max_path", 0))) * 240.0
+		score += _nearest_enemy_distance(cell) * 180.0
+		score -= float(_edge_risk(cell)) * 700.0
+		score -= float(energy) * 20.0
+		# A red cell remains less desirable for a durable hero. It is considered
+		# solely because the regular safe selector proved that no clear exit exists.
+		if _is_cell_threatened(cell):
+			score -= 4000.0
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"kind": "move",
+			"target": cell,
+			"score": score,
+			"energy": energy,
+			"incoming": cell_incoming,
+			"reason": "no clear tile; incoming %d->%d, path %d, AP %d, future exits %d" % [current_incoming, cell_incoming, path.size(), energy, int(exits.get("exits", 0))]
+		}
 	return best
 
 
@@ -2617,6 +3183,13 @@ func _choose_boss_caution_move(controller) -> Dictionary:
 	var spurt_data = controller.my_params.get_detailed_spurt_data()
 	var ignores_traps := _hero_ignores_traps(controller.my_params)
 	var current_distance := _nearest_distance_to_cells(start, boss_cells)
+	var stance := _get_combat_stance(controller)
+	# "Move away" is a safety floor, not an instruction to hug a board edge.
+	# Ranged companions keep their firing distance; melee characters seek a
+	# modest buffer until the boss exposes its actual attack.
+	var desired_distance := maxf(3.0, float(int(stance.get("preferred_distance", 2))))
+	if current_distance >= desired_distance:
+		return {}
 	var best := {}
 	var best_score := -INF
 	for cell in _move_system.get_used_cells():
@@ -2635,7 +3208,11 @@ func _choose_boss_caution_move(controller) -> Dictionary:
 		if distance <= current_distance:
 			continue
 		var exits := _get_future_escape_profile(controller, cell, max(ap, int(controller.my_params.action_points_max)))
-		var score := distance * 3200.0 + float(int(exits.exits)) * 900.0 + float(int(exits.max_path)) * 180.0
+		if not _is_main_hero_controller(controller) and int(exits.exits) <= 0:
+			continue
+		var score := -absf(distance - desired_distance) * 2400.0
+		score += minf(distance, desired_distance) * 1000.0
+		score += float(int(exits.exits)) * 900.0 + float(int(exits.max_path)) * 180.0
 		score -= float(_edge_risk(cell)) * 850.0
 		score -= float(trace.energy) * 15.0
 		if score <= best_score:
@@ -2645,7 +3222,7 @@ func _choose_boss_caution_move(controller) -> Dictionary:
 			"kind": "move",
 			"target": cell,
 			"score": score,
-			"reason": "BOSS CAUTION - untelegraphed %d damage at HP %d; retreat %.1f->%.1f, exits %d" % [assumed_damage, int(controller.my_params.hp), current_distance, distance, int(exits.exits)]
+			"reason": "BOSS CAUTION - untelegraphed %d damage at HP %d; safe distance %.1f, retreat %.1f->%.1f, exits %d" % [assumed_damage, int(controller.my_params.hp), desired_distance, current_distance, distance, int(exits.exits)]
 		}
 	return best
 
@@ -2681,12 +3258,16 @@ func _get_future_escape_profile(controller, origin: Vector2i, available_ap: int)
 
 # A safe staging square is not an attack this turn. It deliberately lets the
 # enemy reveal its next action, while preserving a legal attack and exit for us.
+# This applies to every living enemy count: in Only Companions mode, waiting
+# for the board to be reduced to one enemy made ranged companions repeatedly
+# pass with full AP when they could safely advance into a next-turn firing lane.
 func _choose_best_staging_move(controller, current_incoming: int) -> Dictionary:
 	if controller == null or controller.controlled_object == null:
 		return {}
-	var enemies := _enemy_cells()
-	if enemies.size() != 1:
+	var priority_enemy = _get_party_priority_enemy()
+	if priority_enemy == null or not priority_enemy.is_alive():
 		return {}
+	var priority_position: Vector2i = priority_enemy.obj_position
 	var hero = controller.controlled_object
 	var start: Vector2i = hero.obj_position
 	var params = controller.my_params
@@ -2698,6 +3279,9 @@ func _choose_best_staging_move(controller, current_incoming: int) -> Dictionary:
 	var ignores_traps := _hero_ignores_traps(params)
 	var stance := _get_combat_stance(controller)
 	var desired_distance := int(stance.get("preferred_distance", 1))
+	if not _has_attack_capability(controller):
+		return {}
+	var start_priority_distance: float = start.distance_to(priority_position)
 	var best := {}
 	var best_score := -INF
 
@@ -2719,31 +3303,125 @@ func _choose_best_staging_move(controller, current_incoming: int) -> Dictionary:
 		if _is_cell_threatened(cell):
 			continue
 		var next_attack := _choose_best_attack_from_cell(controller, cell, 0, next_turn_ap)
-		if not _attack_makes_progress(next_attack):
+		var has_next_attack := _attack_makes_progress(next_attack)
+		var distance: float = cell.distance_to(priority_position)
+		var closes_distance := distance + 0.15 < start_priority_distance
+		# If the target is still too far away, use a safe AP-efficient approach
+		# rather than handing the turn back.  A later round can then attack first.
+		if not has_next_attack and not closes_distance:
+			continue
+		var two_turn_ready := not has_next_attack or _has_attack_followup_exit(controller, cell, next_attack, next_turn_ap)
+		if has_next_attack and not two_turn_ready:
 			continue
 		var exits := _get_future_escape_profile(controller, cell, next_turn_ap)
 		if int(exits.exits) <= 0:
 			continue
 
-		var distance := _nearest_enemy_distance(cell)
+		# The next-attack selector already strongly prefers this same enemy; use
+		# its position here too so all companions converge on one dangerous,
+		# low-HP target instead of individually waiting or splitting the party.
 		var score := float(int(exits.exits)) * 1800.0
 		score += float(int(exits.max_path)) * 260.0
-		score += minf(3500.0, maxf(0.0, float(next_attack.score)) * 0.04)
+		if has_next_attack:
+			score += minf(3500.0, maxf(0.0, float(next_attack.score)) * 0.04)
+			if two_turn_ready:
+				score += 5200.0
+		else:
+			score += (start_priority_distance - distance) * 6500.0
 		score -= absf(distance - float(desired_distance)) * 260.0
 		score -= float(_edge_risk(cell)) * 850.0
 		score -= float(path.size()) * 35.0
 		score -= _party_spacing_penalty(controller, cell)
-		if bool(next_attack.lethal) or bool(next_attack.fall):
+		if has_next_attack and (bool(next_attack.lethal) or bool(next_attack.fall)):
 			score += 1600.0
 		if score > best_score:
 			best_score = score
+			var plan_text := "move into %s range" % str(stance.get("mode", "combat"))
+			if has_next_attack:
+				plan_text = "%s -> %s" % [str(next_attack.ability.tag), str(next_attack.target)]
 			best = {
 				"kind": "move",
 				"target": cell,
 				"score": score,
 				"energy": energy,
-				"reason": "NEXT-TURN STAGING - %s -> %s; range %.1f, future exits %d, reach %d, AP %d" % [str(next_attack.ability.tag), str(next_attack.target), distance, int(exits.exits), int(exits.max_path), energy]
-			}
+			"reason": "APPROACH / NEXT-TURN STAGING - priority %s; plan %s; two-turn exit %s, range %.1f, future exits %d, reach %d, AP %d" % [str(priority_position), plan_text, str(two_turn_ready), distance, int(exits.exits), int(exits.max_path), energy]
+		}
+	return best
+
+
+func _choose_support_escort_move(controller) -> Dictionary:
+	if controller == null or not is_instance_valid(controller) or controller.controlled_object == null:
+		return {}
+	if _has_attack_capability(controller):
+		return {}
+	# A one-HP support must not leave a safe tile merely to follow the main hero
+	# while another party member is already standing in a prepared attack. Rescue
+	# decisions take priority; escorting resumes only after the current danger is
+	# resolved for the whole party.
+	if not _get_threatened_player_controllers().is_empty():
+		return {}
+	var anchor_controller = _get_main_hero_controller()
+	if anchor_controller == null or anchor_controller == controller or anchor_controller.controlled_object == null or not anchor_controller.controlled_object.is_alive():
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var anchor: Vector2i = anchor_controller.controlled_object.obj_position
+	var params = controller.my_params
+	var ap := int(params.action_points)
+	if ap <= 0:
+		return {}
+	var support_range := 1
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or _is_consumable_ability(controller, ability):
+			continue
+		if not ability.get_is_ability_an_attack():
+			support_range = maxi(support_range, int(ability.get_max_distance()))
+	var start_distance: float = start.distance_to(anchor)
+	if start_distance <= float(support_range):
+		return {}
+	var spurt_data = params.get_detailed_spurt_data()
+	var ignores_traps := _hero_ignores_traps(params)
+	var best := {}
+	var best_score := -INF
+	for cell in _move_system.get_used_cells():
+		if cell == start or _move_system.has_character(cell) or _move_system.can_fall_from_cell(cell):
+			continue
+		if _move_system.is_obstancle_cell(cell) or (_move_system.has_trap(cell) and not ignores_traps):
+			continue
+		var trace = controller._trace_motion_path(start, cell, spurt_data)
+		if trace == null or not trace.has_valid_path():
+			continue
+		var path: Array = trace.get_front_motion_path()
+		var energy := int(trace.energy)
+		if path.is_empty() or energy > ap:
+			continue
+		if not ignores_traps and _movement_trace_steps_on_trap(trace, start):
+			continue
+		if _is_cell_threatened(cell) or _is_cell_control_threatened(cell):
+			continue
+		var distance: float = cell.distance_to(anchor)
+		if distance + 0.15 >= start_distance:
+			continue
+		var exits := _get_future_escape_profile(controller, cell, max(ap, int(params.action_points_max)))
+		if int(exits.get("exits", 0)) <= 0:
+			continue
+		var score := (start_distance - distance) * 6200.0
+		score += float(int(exits.get("exits", 0))) * 1400.0
+		score += float(int(exits.get("max_path", 0))) * 220.0
+		score -= float(_edge_risk(cell)) * 800.0
+		score -= _party_spacing_penalty(controller, cell)
+		if distance <= float(support_range):
+			score += 8000.0
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"kind": "move",
+			"target": cell,
+			"score": score,
+			"energy": energy,
+			"reason": "SUPPORT ESCORT - close to main hero %s, support range %d, distance %.1f, future exits %d, AP %d" % [str(anchor), support_range, distance, int(exits.get("exits", 0)), energy]
+		}
 	return best
 
 func _movement_trace_steps_on_trap(movement_trace, start: Vector2i) -> bool:
@@ -2756,6 +3434,17 @@ func _movement_trace_steps_on_trap(movement_trace, start: Vector2i) -> bool:
 func _hero_ignores_traps(params) -> bool:
 	for perk in params.perks:
 		if perk is ignore_traps_perk:
+			return true
+	return false
+
+
+func _has_attack_capability(controller) -> bool:
+	if controller == null or not is_instance_valid(controller):
+		return false
+	for ability in _get_available_combat_abilities(controller):
+		if ability == null or _is_consumable_ability(controller, ability):
+			continue
+		if ability.get_is_ability_an_attack() or _is_equipment_effect_attack(controller, ability):
 			return true
 	return false
 
@@ -2880,11 +3569,20 @@ func _score_move_cell(controller, cell: Vector2i, path_size: int, incoming: int,
 
 
 func _edge_risk(cell: Vector2i) -> int:
+	if _static_board_edge_risk.has(cell):
+		return int(_static_board_edge_risk[cell])
 	var risk := 0
+	var board_cells = _move_system.get_used_cells()
 	for direction in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
 		var adjacent: Vector2i = cell + direction
-		if _move_system.can_fall_from_cell(adjacent) and not _move_system.is_obstancle_cell(adjacent):
+		# A board boundary or a one-way pocket is dangerous even where the game
+		# does not expose an adjacent fall tile. This keeps ordinary movement out
+		# of corners unless the tactical benefit is strong enough to justify it.
+		if not board_cells.has(adjacent):
 			risk += 1
+		if _move_system.can_fall_from_cell(adjacent) and not _move_system.is_obstancle_cell(adjacent):
+			risk += 2
+	_static_board_edge_risk[cell] = risk
 	return risk
 
 
@@ -2913,6 +3611,51 @@ func _is_cell_threatened(cell: Vector2i, excluded_controllers: Array = []) -> bo
 			return true
 	return false
 
+
+# The visible red overlay describes the enemy's currently selected target. For
+# a lethal escape we must also reject a candidate that the same prepared
+# ability can legally retarget after the player has moved. This deliberately
+# asks the game's own ability geometry for every legal target cell instead of
+# guessing range, line of sight or area shapes from tags.
+func _get_potentially_retargeted_prepared_cells(controller, origin: Vector2i, excluded_controllers: Array = []) -> Dictionary:
+	var threatened_cells: Dictionary = {}
+	if _turns == null or _move_system == null or controller == null or controller.controlled_object == null:
+		return threatened_cells
+	for enemy_controller in _turns.enemy_controllers:
+		if enemy_controller == null or excluded_controllers.has(enemy_controller):
+			continue
+		var prepared_action = enemy_controller.get_prepared_ability_action()
+		if prepared_action == null:
+			continue
+		var ability = prepared_action.prepared_ability
+		var source = prepared_action.assigned_character
+		if ability == null or source == null or not source.is_alive():
+			continue
+		# Only actions whose live target is this exact controller can follow this
+		# move. Evaluating every enemy against every hypothetical target caused
+		# 0.3–1.2 second stalls on a 9×9 board.
+		if not prepared_action.has_method("_get_actual_target") or prepared_action._get_actual_target() != origin:
+			continue
+		for candidate_cell in _move_system.get_used_cells():
+			# Buckshot changes damage at contact range. Its display pattern is built
+			# for the old target, so game prediction at that old target can show only
+			# the one-damage splash for a candidate that would become a three-damage
+			# point-blank hit after the character moves. Reject it before any generic
+			# target-shape query can mistake it for a safe retarget.
+			if _prepared_action_point_blank_shotgun_damage(prepared_action, candidate_cell) > 0:
+				threatened_cells[candidate_cell] = true
+				continue
+			if not ability.can_mechanically_attack(source.obj_position, candidate_cell, false, false, false):
+				continue
+			if not ability.check_terms(source.obj_position, candidate_cell):
+				continue
+			# The candidate is the dynamic target after a following action. Direct
+			# game prediction is much cheaper than constructing every display zone,
+			# and is sufficient for the lethal-damage guard.
+			var predicted_damage: Dictionary = ability.get_predicted_damage(source.obj_position, candidate_cell)
+			if int(predicted_damage.get(candidate_cell, 0)) > 0:
+				threatened_cells[candidate_cell] = true
+	return threatened_cells
 
 func _control_threats_at(cell: Vector2i, excluded_controllers: Array = []) -> Array[String]:
 	var tags: Array[String] = []
@@ -2983,22 +3726,40 @@ func _prepared_action_marks_cell(prepared_action, cell: Vector2i) -> bool:
 # first, then reserve one point for a marked-but-unreported cell. One is the
 # lowest non-zero damage in Dead Weight and makes the planner dodge it instead
 # of spending its last AP on an apparently safe position.
+func _prepared_action_point_blank_shotgun_damage(prepared_action, cell: Vector2i) -> int:
+	if prepared_action == null:
+		return 0
+	var ability = prepared_action.prepared_ability
+	var source = prepared_action.assigned_character
+	if ability == null or source == null or not source.is_alive():
+		return 0
+	# Goblin buckshot has two distinct modes: three damage in contact range and
+	# a one-damage area pattern farther out. Do not infer this from the current
+	# target overlay, because it is stale after the intended target moves.
+	if not str(ability.tag).to_lower().begins_with("abil_shot_buckshot_dmg3"):
+		return 0
+	return 3 if source.obj_position.distance_to(cell) <= 1.5 else 0
+
+
 func _prepared_action_damage_on_cell(prepared_action, cell: Vector2i) -> int:
 	if prepared_action == null:
 		return 0
 	var reported_damage := max(0, int(prepared_action.get_predicted_damage_on_cell(cell)))
-	if reported_damage > 0:
-		return reported_damage
-	if not _prepared_action_marks_cell(prepared_action, cell):
+	var marks_cell := _prepared_action_marks_cell(prepared_action, cell)
+	var point_blank_damage := _prepared_action_point_blank_shotgun_damage(prepared_action, cell)
+	if reported_damage <= 0 and not marks_cell and point_blank_damage <= 0:
 		return 0
 	var ability = prepared_action.prepared_ability
 	var source = prepared_action.assigned_character
 	if ability != null and source != null and source.is_alive() and prepared_action.has_method("_get_actual_target"):
 		var predicted_damage: Dictionary = ability.get_predicted_damage(source.obj_position, prepared_action._get_actual_target())
 		var full_prediction := max(0, int(predicted_damage.get(cell, 0)))
-		if full_prediction > 0:
-			return full_prediction
-	return 1
+		# The compact UI forecast can report only the ranged splash of a shotgun.
+		# At point-blank distance the full mechanic contains its three-damage hit;
+		# keep the higher value so AUTO never treats that lethal close range as a
+		# one-point trade.
+		return maxi(point_blank_damage, maxi(reported_damage, full_prediction))
+	return maxi(point_blank_damage, reported_damage) if reported_damage > 0 or point_blank_damage > 0 else 1
 
 
 func _get_threatened_player_controllers(excluded_controllers: Array = [], position_override_controller = null, position_override: Vector2i = Vector2i.ZERO) -> Array:
@@ -3161,11 +3922,14 @@ func _stop_after_victory() -> void:
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
+	_pending_move_target = null
 	_approach_memory.clear()
 	_rage_followup_controller_id = -1
 	_rage_followup_plan.clear()
 	_last_stand_followup_controller_id = -1
 	_last_stand_followup_plan.clear()
+	_move_followup_controller_id = -1
+	_move_followup_plan.clear()
 	_battle_nonce += 1
 	_log("victory detected - no end turn")
 
@@ -3300,9 +4064,13 @@ func _finish_active_turn() -> void:
 	if controller != null and is_instance_valid(controller) and int(controller.get_instance_id()) == _last_stand_followup_controller_id:
 		_last_stand_followup_controller_id = -1
 		_last_stand_followup_plan.clear()
+	if controller != null and is_instance_valid(controller) and int(controller.get_instance_id()) == _move_followup_controller_id:
+		_move_followup_controller_id = -1
+		_move_followup_plan.clear()
 	_turn_running = false
 	_active_controller = null
 	_pending_action = ""
+	_pending_move_target = null
 	if controller == null or _turns == null or controller != _turns.active_player_controller:
 		return
 	if controller.active and controller.controlled_object.is_alive():
@@ -3508,6 +4276,7 @@ func _log_state(controller) -> void:
 	for ability in _get_available_combat_abilities(controller):
 		skill_text += "%s[%d] " % [ability.tag, int(ability.get_final_ap_cost())]
 	_log("HP %d/%d | EN %d/%d | danger %s | incoming %d | control %s/%s | party red %d" % [params.hp, params.get_max_hp(), params.action_points, params.action_points_max, "RED" if self_threatened else "CLEAR", incoming, ",".join(active_control) if not active_control.is_empty() else "clear", ",".join(incoming_control) if not incoming_control.is_empty() else "clear", threatened_party.size()])
+	_log_prepared_threat_profile(pos)
 	_print_talent_profile(controller)
 	_print_party_profile()
 	_print_rage_profile(controller)
@@ -3515,6 +4284,32 @@ func _log_state(controller) -> void:
 	_print_meta_profile()
 	_print_consumable_catalog(controller)
 	print("[AUTO] available skills: " + skill_text.strip_edges())
+
+
+func _log_prepared_threat_profile(cell: Vector2i) -> void:
+	if _turns == null:
+		return
+	for enemy_controller in _turns.enemy_controllers:
+		if enemy_controller == null or enemy_controller.controlled_object == null:
+			continue
+		var prepared_action = enemy_controller.get_prepared_ability_action()
+		if prepared_action == null:
+			continue
+		var ability = prepared_action.prepared_ability
+		var source = prepared_action.assigned_character
+		if ability == null or source == null or not source.is_alive():
+			continue
+		var ui_damage := max(0, int(prepared_action.get_predicted_damage_on_cell(cell)))
+		var point_blank_damage := _prepared_action_point_blank_shotgun_damage(prepared_action, cell)
+		var full_damage := 0
+		var target := Vector2i.ZERO
+		if prepared_action.has_method("_get_actual_target"):
+			target = prepared_action._get_actual_target()
+			var predicted: Dictionary = ability.get_predicted_damage(source.obj_position, target)
+			full_damage = max(0, int(predicted.get(cell, 0)))
+		if ui_damage <= 0 and full_damage <= 0 and point_blank_damage <= 0 and not _prepared_action_marks_cell(prepared_action, cell):
+			continue
+		_log("ENEMY INTENT %s | source %s | target %s | distance %.1f | UI %d, full %d, point-blank %d, used %d" % [str(ability.tag), str(source.obj_position), str(target), source.obj_position.distance_to(cell), ui_damage, full_damage, point_blank_damage, _prepared_action_damage_on_cell(prepared_action, cell)])
 
 
 func _track_battle_round(hero_id: int) -> void:

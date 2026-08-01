@@ -187,7 +187,9 @@ function Find-VdfBlock([string]$Text, [string]$Key) {
 }
 
 function Escape-VdfValue([string]$Value) {
-    return $Value.Replace('"', '\"')
+    # VDF consumes backslash escape sequences. Both the Windows path
+    # separators and quote delimiters must survive Steam's read/write cycle.
+    return $Value.Replace('\', '\\').Replace('"', '\"')
 }
 
 function Set-LaunchOptionInVdf([string]$ConfigPath, [string]$LaunchOption) {
