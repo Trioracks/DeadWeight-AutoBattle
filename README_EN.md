@@ -36,7 +36,7 @@ AUTO uses available game controllers, so the game itself applies energy costs, c
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;
 - may keep energy and end on a safe cell instead of returning into an attack;
 - reads abilities, talents, some equipment and available consumables;
-- resolves every active skill granted by equipped weapons and items; ready attack skills are preferred, while defensive and setup skills are used only when they preserve a safe follow-up;
+- resolves every active skill granted by equipped weapons and items, including damage-over-time effects; ready attack skills are preferred, while a critical hero retreats if a boss has an untelegraphed attack;
 - deliberately never triggers the game's escape/run-ending controls automatically.
 
 This is an active test build. If a decision looks wrong, turn AUTO off with the top-right button and continue manually.

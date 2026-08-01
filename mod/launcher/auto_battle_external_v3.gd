@@ -11,6 +11,7 @@ const FALL_KILL_SCORE := 100000.0
 const ENEMY_KILL_SCORE := 18000.0
 const EMERGENCY_DAMAGE_RATIO := 0.45
 const LOW_HP_RATIO := 0.40
+const UNTELEGRAPHED_BOSS_DAMAGE := 3
 const BATTLE_UI_ATTACH_RETRIES := 40
 const ICON_OFF_TINT := Color(0.58, 0.58, 0.58, 0.82)
 # Replaced by the release builder inside runtime/launcher. The source fallback
@@ -501,10 +502,15 @@ func _choose_plan(controller) -> Dictionary:
 	other_party_members_threatened.erase(controller)
 	var support := _choose_best_support(controller)
 	var attack := _choose_best_attack(controller, incoming)
+	var ready_equipment_attack := not attack.is_empty() and _is_equipped_item_ability(controller.my_params, attack.get("ability", null)) and _attack_makes_progress(attack)
 	var equipment_setup := _choose_equipment_setup_skill(controller, attack)
 	# Rage is planned before ordinary movement: it may turn a one-damage melee
 	# strike into an immediate kill, and therefore opens a safe retreat.
 	var rage_ultimate := _choose_rage_ultimate(controller, incoming)
+	# Scripted boss actions do not always expose an ordinary prepared red zone.
+	# At critical HP, reserve the whole turn for a real retreat instead of
+	# trusting an empty telegraph and ending in a one-shot range.
+	var boss_caution_move := _choose_boss_caution_move(controller)
 	# This is deliberately separate from the generic dodge scorer: a ranged
 	# hero should choose a safe one-step firing position over a farther retreat.
 	var safe_hit_step := _choose_best_safe_move_for_hit(controller, incoming)
@@ -621,6 +627,8 @@ func _choose_plan(controller) -> Dictionary:
 	var rage_followup := _choose_rage_followup(controller, incoming)
 	if not rage_followup.is_empty():
 		return rage_followup
+	if not boss_caution_move.is_empty() and (attack.is_empty() or not bool(attack.lethal) and not bool(attack.fall)):
+		return boss_caution_move
 
 	# A Rage setup that converts the selected weapon hit into a kill is stronger
 	# than a routine approach step. The next decision uses the exact stored hit,
@@ -631,7 +639,7 @@ func _choose_plan(controller) -> Dictionary:
 	# From a safe cell, take any move that preserves enough AP for a real hit.
 	# This picks the firing square itself (for example, one step down then shot)
 	# rather than a generic movement destination.
-	if not safe_hit_step.is_empty() and (attack.is_empty() or not bool(attack.lethal) and not bool(attack.fall)):
+	if not safe_hit_step.is_empty() and not ready_equipment_attack and (attack.is_empty() or not bool(attack.lethal) and not bool(attack.fall)):
 		safe_hit_step["reason"] = "STEP FOR SAFE HIT - " + str(safe_hit_step.reason)
 		return safe_hit_step
 
@@ -667,7 +675,7 @@ func _choose_plan(controller) -> Dictionary:
 
 
 func _attack_makes_progress(attack: Dictionary) -> bool:
-	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or int(attack.get("traps_destroyed", 0)) > 0 or int(attack.get("objects_repositioned", 0)) > 0 or bool(attack.get("fall", false)))
+	return not attack.is_empty() and (int(attack.get("enemy_damage", 0)) > 0 or int(attack.get("enemy_effect_hits", 0)) > 0 or int(attack.get("enemy_push_hits", 0)) > 0 or int(attack.get("traps_destroyed", 0)) > 0 or int(attack.get("objects_repositioned", 0)) > 0 or bool(attack.get("fall", false)))
 
 
 
@@ -1163,6 +1171,40 @@ func _get_support_values(ability) -> Dictionary:
 	return values
 
 
+func _get_offensive_effect_values(ability) -> Dictionary:
+	var values := {"damage": 0, "control": 0, "effects": []}
+	if ability == null:
+		return values
+	for mechanic in ability.get_full_mechanics_array():
+		if mechanic == null or bool(mechanic.get("apply_to_self")):
+			continue
+		var effects = mechanic.get("all_effects")
+		if effects == null:
+			continue
+		for effect in effects:
+			if effect == null:
+				continue
+			var signature := _effect_signature(effect)
+			var amount := max(1, _effect_amount(effect))
+			var duration_raw = effect.get("duration")
+			var duration := maxi(1, int(duration_raw)) if duration_raw != null else 1
+			if signature.contains("bleed") or signature.contains("poison") or signature.contains("burn") or signature.contains("damage_over_time"):
+				var delayed_damage := amount * duration
+				values["damage"] = int(values.damage) + delayed_damage
+				values.effects.append("%s %d" % ["bleed" if signature.contains("bleed") else "DoT", delayed_damage])
+			elif signature.contains("sleep") or signature.contains("stun") or signature.contains("freeze") or signature.contains("immov") or signature.contains("silence"):
+				values["control"] = int(values.control) + duration
+				values.effects.append("control %d" % duration)
+	return values
+
+
+func _is_equipment_effect_attack(controller, ability) -> bool:
+	if controller == null or ability == null or not _is_equipped_item_ability(controller.my_params, ability):
+		return false
+	var values := _get_offensive_effect_values(ability)
+	return int(values.get("damage", 0)) > 0 or int(values.get("control", 0)) > 0
+
+
 func _score_support(controller, ability, target_controller, target: Vector2i, values: Dictionary) -> Dictionary:
 	var target_params = target_controller.my_params
 	var incoming := _incoming_damage_at(target)
@@ -1262,7 +1304,12 @@ func _effect_amount(effect) -> int:
 	if effect == null:
 		return 0
 	if effect.has_method("get_fin_value"):
-		return max(0, int(effect.get_fin_value()))
+		var final_value := max(0, int(effect.get_fin_value()))
+		if final_value > 0:
+			return final_value
+	var damage = effect.get("damage")
+	if damage != null:
+		return max(0, int(damage))
 	var raw_value = effect.get("value")
 	if raw_value != null:
 		return max(0, int(raw_value))
@@ -1662,7 +1709,7 @@ func _choose_equipment_setup_skill(controller, _primary_attack: Dictionary) -> D
 		var ability = entry.ability
 		if ability == null or _equipment_skill_was_used_this_turn(controller, ability):
 			continue
-		if ability.get_is_ability_an_attack() or _ability_is_push(ability) or _is_rage_damage_ultimate(controller, ability):
+		if ability.get_is_ability_an_attack() or _is_equipment_effect_attack(controller, ability) or _ability_is_push(ability) or _is_rage_damage_ultimate(controller, ability):
 			continue
 		var values := _get_support_values(ability)
 		if int(values.get("heal", 0)) > 0 or int(values.get("defence", 0)) > 0 or int(values.get("block", 0)) > 0 or bool(values.get("evasion", false)) or int(values.get("energy", 0)) > 0:
@@ -1782,6 +1829,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var score := float(ability.priority) * 10.0
 	var equipped_item_skill := _is_equipped_item_ability(controller.my_params, ability)
 	var equipped_weapon_attack := _is_equipped_weapon_ability(controller.my_params, ability)
+	var offensive_effects := _get_offensive_effect_values(ability) if equipped_item_skill else {"damage": 0, "control": 0, "effects": []}
 	# A durable item skill is an intentional build choice. Its actual damage, AP
 	# cost, target terms and cooldown are still validated below; this bonus only
 	# resolves comparable legal actions in favour of a ready equipped skill.
@@ -1793,6 +1841,9 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	var lethal := false
 	var fall := false
 	var enemy_damage := 0
+	var enemy_effect_hits := 0
+	var enemy_effect_damage := 0
+	var enemy_effect_control := 0
 	var enemy_push_hits := 0
 	var objects_repositioned := 0
 	var traps_destroyed := 0
@@ -1837,6 +1888,30 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		elif target_object.is_player_character():
 			self_damage += damage
 			score -= 50000.0 + float(damage) * 1200.0
+
+	# Item skills such as the spear apply a damaging effect (bleed) rather than
+	# returning direct damage in get_predicted_damage(). Count a legal enemy hit
+	# with such an effect as real progress, so it competes with a basic strike.
+	if int(offensive_effects.get("damage", 0)) > 0 or int(offensive_effects.get("control", 0)) > 0:
+		var effect_cells: Array[Vector2i] = []
+		for selected_cell in selected_cells:
+			_candidate_append(effect_cells, selected_cell)
+		_candidate_append(effect_cells, target)
+		for effect_cell in effect_cells:
+			var effect_target = _move_system.get_character(effect_cell)
+			if effect_target == null or not effect_target.is_enemy_character():
+				continue
+			enemy_effect_hits += 1
+			var delayed_damage := int(offensive_effects.get("damage", 0))
+			var control_turns := int(offensive_effects.get("control", 0))
+			enemy_effect_damage += delayed_damage
+			enemy_effect_control += control_turns
+			score += float(delayed_damage) * 480.0 + float(control_turns) * 2100.0
+			if effect_target.my_controller != null and not hit_enemy_controllers.has(effect_target.my_controller):
+				hit_enemy_controllers.append(effect_target.my_controller)
+			if effect_target == priority_enemy:
+				hits_party_priority = true
+				score += 2200.0
 
 	if _ability_is_push(ability):
 		var push_result := _score_push_falls(ability, start, target)
@@ -1893,7 +1968,7 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 	elif party_threats_after > party_threats_before:
 		score -= 30000.0
 
-	if enemy_damage <= 0 and enemy_push_hits <= 0 and traps_destroyed <= 0 and objects_repositioned <= 0 and not fall:
+	if enemy_damage <= 0 and enemy_effect_hits <= 0 and enemy_push_hits <= 0 and traps_destroyed <= 0 and objects_repositioned <= 0 and not fall:
 		score -= 900.0
 
 	var danger_text := "%s->%s" % ["RED" if self_threatened else "CLEAR", "CLEAR" if self_safe_after else "RED"]
@@ -1906,6 +1981,8 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		reason = "BREAK TRAP x%d (%s)" % [traps_destroyed, reason]
 	elif enemy_push_hits > 0:
 		reason = "PUSH OBJECT INTO ENEMY x%d (%s)" % [enemy_push_hits, reason]
+	elif enemy_effect_hits > 0:
+		reason = "EQUIPMENT EFFECT %s on x%d (%s)" % [", ".join(offensive_effects.effects), enemy_effect_hits, reason]
 	elif lethal:
 		reason = "lethal (%s)" % reason
 	if enemy_hit_count >= 2:
@@ -1930,6 +2007,9 @@ func _score_attack(controller, ability, start: Vector2i, target: Vector2i, curre
 		"fall": fall,
 		"self_damage": self_damage,
 		"enemy_damage": enemy_damage,
+		"enemy_effect_hits": enemy_effect_hits,
+		"enemy_effect_damage": enemy_effect_damage,
+		"enemy_effect_control": enemy_effect_control,
 		"enemy_push_hits": enemy_push_hits,
 		"objects_repositioned": objects_repositioned,
 		"traps_destroyed": traps_destroyed,
@@ -2176,6 +2256,96 @@ func _choose_best_move(controller, current_incoming: int, require_safe: bool = f
 
 
 
+# A scripted boss can schedule an action outside the normal prepared-action
+# overlay. If it has no zone on any living hero, we cannot honestly label a
+# zero-damage cell as safe at one-shot HP. Treat that uncertainty as a three
+# point threat (the observed boss burst), retain all AP and move away from the
+# boss instead of attacking a trap or ending in place.
+func _get_untelegraphed_boss_profile() -> Dictionary:
+	var profile := {"damage": 0, "positions": []}
+	if _turns == null:
+		return profile
+	for enemy_controller in _turns.enemy_controllers:
+		if enemy_controller == null or enemy_controller.controlled_object == null:
+			continue
+		var boss = enemy_controller.controlled_object
+		var boss_params = boss.get("my_params")
+		if boss_params == null or not bool(boss_params.get("character_is_boss")):
+			continue
+		var prepared_action = enemy_controller.get_prepared_ability_action()
+		var has_announced_player_target := false
+		if prepared_action != null:
+			for player_controller in _turns.player_controllers:
+				if player_controller == null or player_controller.controlled_object == null or not player_controller.controlled_object.is_alive():
+					continue
+				var player_cell: Vector2i = player_controller.controlled_object.obj_position
+				if _prepared_action_marks_cell(prepared_action, player_cell) or _prepared_action_damage_on_cell(prepared_action, player_cell) > 0:
+					has_announced_player_target = true
+					break
+		if has_announced_player_target:
+			continue
+		profile["damage"] = maxi(int(profile.damage), UNTELEGRAPHED_BOSS_DAMAGE)
+		profile.positions.append(boss.obj_position)
+	return profile
+
+
+func _nearest_distance_to_cells(cell: Vector2i, cells: Array) -> float:
+	var nearest := INF
+	for other_cell in cells:
+		nearest = minf(nearest, cell.distance_to(other_cell))
+	return nearest if nearest < INF else 0.0
+
+
+func _choose_boss_caution_move(controller) -> Dictionary:
+	if controller == null or controller.controlled_object == null:
+		return {}
+	var profile := _get_untelegraphed_boss_profile()
+	var assumed_damage := int(profile.get("damage", 0))
+	var boss_cells: Array = profile.get("positions", [])
+	if assumed_damage <= 0 or boss_cells.is_empty() or int(controller.my_params.hp) > assumed_damage:
+		return {}
+	var hero = controller.controlled_object
+	var start: Vector2i = hero.obj_position
+	var ap := int(controller.my_params.action_points)
+	if ap <= 0:
+		return {}
+	var spurt_data = controller.my_params.get_detailed_spurt_data()
+	var ignores_traps := _hero_ignores_traps(controller.my_params)
+	var current_distance := _nearest_distance_to_cells(start, boss_cells)
+	var best := {}
+	var best_score := -INF
+	for cell in _move_system.get_used_cells():
+		if cell == start or _move_system.has_character(cell) or _move_system.can_fall_from_cell(cell):
+			continue
+		if _move_system.is_obstancle_cell(cell) or (_move_system.has_trap(cell) and not ignores_traps):
+			continue
+		var trace = controller._trace_motion_path(start, cell, spurt_data)
+		if trace == null or not trace.has_valid_path() or int(trace.energy) > ap:
+			continue
+		if not ignores_traps and _movement_trace_steps_on_trap(trace, start):
+			continue
+		if _is_cell_threatened(cell):
+			continue
+		var distance := _nearest_distance_to_cells(cell, boss_cells)
+		if distance <= current_distance:
+			continue
+		var exits := _get_future_escape_profile(controller, cell, max(ap, int(controller.my_params.action_points_max)))
+		var score := distance * 3200.0 + float(int(exits.exits)) * 900.0 + float(int(exits.max_path)) * 180.0
+		score -= float(_edge_risk(cell)) * 850.0
+		score -= float(trace.energy) * 15.0
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"kind": "move",
+			"target": cell,
+			"score": score,
+			"reason": "BOSS CAUTION - untelegraphed %d damage at HP %d; retreat %.1f->%.1f, exits %d" % [assumed_damage, int(controller.my_params.hp), current_distance, distance, int(exits.exits)]
+		}
+	return best
+
+
+
 # Counts terrain exits that remain reachable with a fresh turn's movement budget.
 # The trace uses the final hero parameters, so equipment such as +1 Step is
 # automatically reflected here instead of being guessed from item names.
@@ -2307,12 +2477,15 @@ func _get_combat_stance(controller) -> Dictionary:
 	var equipped_reach_weapon := false
 	var weapon_abilities := _get_weapon_ability_tags(controller.my_params)
 	for ability in _get_available_combat_abilities(controller):
-		if ability == null or not ability.get_is_ability_an_attack():
+		if ability == null:
+			continue
+		var effect_attack := _is_equipment_effect_attack(controller, ability)
+		if not ability.get_is_ability_an_attack() and not effect_attack:
 			continue
 		var weapon_weight := 4 if weapon_abilities.has(str(ability.tag)) else 1
 		var has_reach := int(ability.get_max_distance()) >= 2
 		var is_ranged_type := ability.ability_type == character_ability.ABILITY_TYPE.RANGE or ability.ability_type == character_ability.ABILITY_TYPE.CAST or ability.ability_type == character_ability.ABILITY_TYPE.THROW
-		if is_ranged_type or weapon_weight > 1 and has_reach:
+		if is_ranged_type or effect_attack and has_reach or weapon_weight > 1 and has_reach:
 			if has_reach:
 				ranged_strength += weapon_weight
 				preferred_distance = maxi(preferred_distance, mini(4, maxi(2, int(ability.get_max_distance()) - 1)))
@@ -2349,9 +2522,11 @@ func _print_equipment_profile(controller) -> void:
 		equipment.append(str(item.tag) + suffix)
 	var attack_stats: Array[String] = []
 	for ability in _get_available_combat_abilities(controller):
-		if ability == null or not ability.get_is_ability_an_attack():
+		if ability == null or not ability.get_is_ability_an_attack() and not _is_equipment_effect_attack(controller, ability):
 			continue
-		attack_stats.append("%s(AP%d,R%d)" % [str(ability.tag), int(ability.get_final_ap_cost()), int(ability.get_max_distance())])
+		var effect_values := _get_offensive_effect_values(ability)
+		var effect_text := " +" + "/".join(effect_values.effects) if not effect_values.effects.is_empty() else ""
+		attack_stats.append("%s(AP%d,R%d%s)" % [str(ability.tag), int(ability.get_final_ap_cost()), int(ability.get_max_distance()), effect_text])
 	var stance := _get_combat_stance(controller)
 	var signature := "|".join(equipment) + "#" + "|".join(attack_stats) + "#" + str(stance)
 	var controller_key := str(controller.get_instance_id())
