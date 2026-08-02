@@ -1,6 +1,6 @@
 # AUTO Battle — Dead Weight mod | EN
 
-**Current version: v0.2.21.**
+**Current version: v0.2.34.**
 
 **Dead Weight — AUTO Battle** adds two buttons in the top-right corner during combat only:
 
@@ -47,6 +47,7 @@ If the network is unavailable or verification fails, the installed version stays
 - does not spend energy to step back into danger when already safe;
 - considers available abilities, some talents, equipment and consumables, including active skills granted by equipped weapons and items;
 - ready offensive equipment skills take priority, while a critically wounded hero keeps a move for retreating from an untelegraphed boss attack;
+- for Klyukva, the opening range bonus and **Hold Position** talent are considered: after a safe shot, she can keep a safe tile to build her next attack, but never at the cost of entering damage or control;
 - Bully keeps a thrust lane, retreats through a verified safe route at half HP or lower, and uses charge-push only for a guaranteed enemy fall;
 - never automatically presses escape, main menu or any run-ending control.
 

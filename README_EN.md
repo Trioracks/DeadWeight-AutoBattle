@@ -2,7 +2,7 @@
 
 [Русский](README.md) | [English](README_EN.md)
 
-A Windows test build of AUTO Battle for the Steam version of **Dead Weight**. The mod adds `AUTO` and `ONLY COMPANIONS` buttons during combat: the first controls the whole party, while the second controls companions only and leaves the main hero manual. The modes are mutually exclusive and remembered for the next encounter.
+A Windows AUTO Battle mod for the Steam version of **Dead Weight**. It adds `AUTO` and `ONLY COMPANIONS` buttons during combat: the first controls the whole party, while the second controls companions only and leaves the main hero manual. The modes are mutually exclusive and remembered for the next encounter.
 
 ## Player installation
 
@@ -38,6 +38,7 @@ AUTO uses available game controllers, so the game itself applies energy costs, c
 - when one enemy remains and can be finished, ends the encounter instead of spending a separate turn on a trap;
 - may keep energy and end on a safe cell instead of returning into an attack;
 - reads abilities, talents, some equipment and available consumables;
+- for Klyukva, considers her opening-range talent and **Hold Position**: after a safe shot, she keeps a safe tile to build the next attack only when no more useful attack is available;
 - resolves every active skill granted by equipped weapons and items, including damage-over-time effects; ready attack skills are preferred, while a critical hero retreats if a boss has an untelegraphed attack;
 - treats the Bully companion as a fragile skirmisher: uses the two-cell thrust lane, retreats to a verified safe route at half HP or lower, and reserves the charge-push for a verified enemy fall;
 - deliberately never triggers the game's escape/run-ending controls automatically.
